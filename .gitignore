@@ -4,3 +4,6 @@ uploads
 *.sqlite
 *.db
 .env
+
+# local sqlite artifacts
+data/*.sqlite*
