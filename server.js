@@ -498,6 +498,7 @@ app.post("/auth/logout", csrfProtection, (req, res) => {
 app.post("/auth/logout-beacon", (req, res) => {
   const origin = req.get("origin");
   const host = req.get("host");
+  const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
   if (origin) {
     try {
       const u = new URL(origin);
@@ -639,6 +640,7 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   }
 
   const u = getUserById(req.session.uid);
+  const avatarUrl = latestAvatarUrl(req.session.uid);
   return res.json({
     ok: true,
     user: u ? { id: u.id, email: u.email, displayName, avatarUrl } : null,
