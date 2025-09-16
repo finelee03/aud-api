@@ -611,6 +611,7 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   }
 
   const u = getUserById(req.session.uid);
+  const avatarUrl = latestAvatarUrl(req.session.uid);
   return res.json({
     ok: true,
     user: u ? { id: u.id, email: u.email, displayName, avatarUrl } : null,
@@ -1063,7 +1064,7 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
       const authorMap = new Map();
       for (const uid of authorIds) {
         const row = getUserById(Number(uid));
-        authorMap.set(aid, row ? publicUserShape(req.session?.uid, row) : null);
+        authorMap.set(String(uid), row ? publicUserShape(req.session?.uid, row) : null);
       }
 
       res.json({
