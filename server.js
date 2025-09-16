@@ -735,6 +735,8 @@ app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
 mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 mountIfExists("./routes/comments.routes");  // 댓글 CRUD
+mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
+
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
 
