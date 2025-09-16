@@ -501,18 +501,32 @@ app.post("/auth/logout", csrfProtection, (req, res) => {
 
 // 마지막 탭 종료/비콘 로그아웃 (CSRF 없음)
 app.post("/auth/logout-beacon", (req, res) => {
-  const origin = req.get("origin");
-  const host = req.get("host");
+  const origin = (req.get("origin") || "").replace(/\/$/, "").toLowerCase();
+  const host   = (req.get("host") || "").toLowerCase();
   const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
+
+  // Allow same-origin OR any origin explicitly allowed via CORS ALLOWED_ORIGINS
   if (origin) {
     try {
       const u = new URL(origin);
-      if (u.host !== host) return res.status(403).json({ ok: false });
-    } catch { /* malformed origin → 동오리진만 도달하므로 허용 */ }
+      const o = (u.origin || origin).replace(/\/$/, "").toLowerCase();
+      if (ALLOWED_ORIGINS.length) {
+        if (!ALLOWED_ORIGINS.includes(o)) {
+          return res.status(403).json({ ok: false, reason: "origin-not-allowed" });
+        }
+      } else if (u.host !== host) {
+        // When no ALLOWED_ORIGINS configured, require same host
+        return res.status(403).json({ ok: false, reason: "cross-origin-blocked" });
+      }
+    } catch {
+      // malformed origin → allow only if same host (by falling through without early return)
+    }
   }
+
   if (isRecentNavigate(req)) {
     return res.json({ ok: true, skipped: "recent-nav" });
   }
+
   const name = PROD ? "__Host-sid" : "sid";
   if (!req.session?.uid) {
     res.clearCookie(name, clearOpts);
