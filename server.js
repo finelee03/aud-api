@@ -191,32 +191,7 @@ app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser(SESSION_SECRET)); // CSRF(cookie 모드) 서명용
 app.use(compression());                // 응답 압축
-// 게이트웨이 → 서버 업링크 (HTTP)
-app.post("/gateway/ble", (req, res) => {
-  const token = req.get("x-gateway-token") || req.query.token;
-  if (!GATEWAY_TOKEN || token !== GATEWAY_TOKEN) {
-    return res.status(403).json({ ok: false, error: "forbidden" });
-  }
 
-  const evt = req.body || {};
-  // collect.js의 파서를 고려해 다양한 필드 허용
-  // 1) 바이트 배열 → { bytes: [...] }
-  // 2) 문자열 → { mfg: "UID:04AABB..." } or { text: "UID:..." }
-  // 3) 라벨 힌트가 있으면 { label: "whee" }
-  // 4) 단순 UID만 오면 { uid: "04AABB..." } 로도 허용
-  if (Array.isArray(evt.bytes) || typeof evt.mfg === "string" || typeof evt.text === "string") {
-    io.emit("ble", {
-      bytes: evt.bytes,
-      mfg:   evt.mfg,
-      text:  evt.text,
-      fields: evt.fields,   // 선택
-      ts: Date.now()
-    });
-  } else if (typeof evt.uid === "string") {
-    io.emit("nfc", { uid: evt.uid, label: evt.label || null, ts: Date.now() });
-  }
-  return res.json({ ok: true });
-});
 
 // 세션
 const SqliteStore = SqliteStoreFactory(session);
