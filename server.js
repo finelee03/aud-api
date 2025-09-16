@@ -28,8 +28,6 @@ const {
   putUserState,
 } = require("./db");
 
-const { startBleBridge } = require("./ble-bridge");
-
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
@@ -1790,16 +1788,7 @@ server.listen(PORT, () => {
   if (!PROD) printRoutesSafe();
 
   // BLE 브리지 초기화(실패해도 서버는 계속)
-  try {
-    if (typeof startBleBridge === "function") {
-      startBleBridge(io, { companyIdLE: 0xFFFF, log: true });
-      console.log("[ble] bridge started");
-    } else {
-      console.log("[ble] startBleBridge not available");
-    }
-  } catch (e) {
-    console.log("[ble] bridge failed to start:", e?.message || e);
-  }
+  console.log("[ble] using gateway uplink: POST /gateway/ble");
 });
 
 
