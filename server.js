@@ -157,12 +157,7 @@ if (CROSS_SITE) {
     },
     credentials: true,
     methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "X-CSRF-Token", "x-csrf-token",
-      "X-XSRF-Token", "x-xsrf-token",   // ← 추가
-      "X-Requested-With"                // ← 일부 라이브러리 대비
-    ],
+    allowedHeaders: ["Content-Type","X-CSRF-Token","x-csrf-token","X-XSRF-Token","x-xsrf-token"],
     maxAge: 86400,
   };
   app.use(cors(corsOptions));
