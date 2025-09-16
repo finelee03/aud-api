@@ -43,9 +43,10 @@ const server = http.createServer(app);
 const CROSS_SITE = process.env.CROSS_SITE === "1";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",").map(s => s.trim()).filter(Boolean);
+const ENABLE_IO_CORS = CROSS_SITE || ALLOWED_ORIGINS.length > 0;
 const io = new Server(server, {
   path: "/socket.io",
-  ...(CROSS_SITE && {
+  ...(ENABLE_IO_CORS && {
     cors: {
       origin(origin, cb) {
         if (!origin) return cb(null, true);                 // curl, 서버-서버
@@ -153,7 +154,12 @@ if (CROSS_SITE) {
     },
     credentials: true,
     methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-CSRF-Token", "x-csrf-token"],
+    allowedHeaders: [
+      "Content-Type",
+      "X-CSRF-Token", "x-csrf-token",
+      "X-XSRF-Token", "x-xsrf-token",   // ← 추가
+      "X-Requested-With"                // ← 일부 라이브러리 대비
+    ],
     maxAge: 86400,
   };
   app.use(cors(corsOptions));
@@ -466,7 +472,7 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
   const row = getUserByEmail(email.toLowerCase());
   if (!row) return res.status(400).json({ ok: false, error: "NO_USER" });
 
-  const ok = await argon2.verify(row.pwHash, password);
+  const ok = await argon2.verify(row.pwHash ?? row.pw_hash, password);
   if (!ok) return res.status(400).json({ ok: false, error: "BAD_CREDENTIALS" });
 
   req.session.regenerate((err) => {
