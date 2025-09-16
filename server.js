@@ -27,7 +27,16 @@ const {
   putUserState,
 } = require("./db");
 
-const { startBleBridge } = require("./ble-bridge");
+ // BLE 브리지는 로컬 개발에서만 선택적으로 사용한다.
+ let startBleBridge = null;
+ if (process.env.BLE_BRIDGE === "1") {
+   try {
+     ({ startBleBridge } = require("./ble-bridge"));
+     console.log("[ble] module loaded");
+   } catch (e) {
+     console.log("[ble] module not available:", e.message);
+   }
+ }
 
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
