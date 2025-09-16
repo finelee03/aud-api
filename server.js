@@ -40,9 +40,11 @@ const BOOT_ID = uuid();
 const app = express();
 const server = http.createServer(app);
 // Frontend가 다른 오리진(예: GitHub Pages)일 때 CORS 허용
-const CROSS_SITE = process.env.CROSS_SITE === "1";
+const CROSS_SITE = /^(1|true|yes|on)$/i.test(process.env.CROSS_SITE || "");
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
-  .split(",").map(s => s.trim()).filter(Boolean);
+  .split(",")
+  .map(s => s.trim().replace(/\/$/, "").toLowerCase())
+  .filter(Boolean);
 const ENABLE_IO_CORS = CROSS_SITE || ALLOWED_ORIGINS.length > 0;
 const io = new Server(server, {
   path: "/socket.io",
@@ -51,7 +53,8 @@ const io = new Server(server, {
       origin(origin, cb) {
         if (!origin) return cb(null, true);                 // curl, 서버-서버
         if (!ALLOWED_ORIGINS.length) return cb(null, true); // 미설정 → 허용
-        cb(null, ALLOWED_ORIGINS.includes(origin));
+        const o = String(origin || "").replace(/\/$/, "").toLowerCase();
+        cb(null, !ALLOWED_ORIGINS.length || ALLOWED_ORIGINS.includes(o));
       },
       credentials: true,
       methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
@@ -163,7 +166,7 @@ if (CROSS_SITE) {
     maxAge: 86400,
   };
   app.use(cors(corsOptions));
-  app.options("*", cors(corsOptions)); // preflight
+  app.options(/.*/, cors(corsOptions));
 }
 
 app.use(
@@ -183,6 +186,7 @@ app.use(
       },
     },
     crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
   })
 );
 
