@@ -5,6 +5,7 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const helmet = require("helmet");
+const cors = require("cors");
 const session = require("express-session");
 const SqliteStoreFactory = require("better-sqlite3-session-store");
 const Sqlite = require("better-sqlite3");
@@ -27,16 +28,7 @@ const {
   putUserState,
 } = require("./db");
 
- // BLE 브리지는 로컬 개발에서만 선택적으로 사용한다.
- let startBleBridge = null;
- if (process.env.BLE_BRIDGE === "1") {
-   try {
-     ({ startBleBridge } = require("./ble-bridge"));
-     console.log("[ble] module loaded");
-   } catch (e) {
-     console.log("[ble] module not available:", e.message);
-   }
- }
+const { startBleBridge } = require("./ble-bridge");
 
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
@@ -47,7 +39,24 @@ fs.mkdirSync(AVATAR_DIR, { recursive: true });
 const BOOT_ID = uuid();
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { path: "/socket.io" });
+// Frontend가 다른 오리진(예: GitHub Pages)일 때 CORS 허용
+const CROSS_SITE = process.env.CROSS_SITE === "1";
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",").map(s => s.trim()).filter(Boolean);
+const io = new Server(server, {
+  path: "/socket.io",
+  ...(CROSS_SITE && {
+    cors: {
+      origin(origin, cb) {
+        if (!origin) return cb(null, true);                 // curl, 서버-서버
+        if (!ALLOWED_ORIGINS.length) return cb(null, true); // 미설정 → 허용
+        cb(null, ALLOWED_ORIGINS.includes(origin));
+      },
+      credentials: true,
+      methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+    }
+  })
+});
 
 const PORT = process.env.PORT || 8787;
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -134,6 +143,23 @@ function getNS(req) {
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 
+// ── CORS (교차 출처 프런트 허용) ───────────────────────────────
+if (CROSS_SITE) {
+  const corsOptions = {
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (!ALLOWED_ORIGINS.length) return cb(null, true);
+      cb(null, ALLOWED_ORIGINS.includes(origin));
+    },
+    credentials: true,
+    methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
+    allowedHeaders: ["Content-Type", "X-CSRF-Token", "x-csrf-token"],
+    maxAge: 86400,
+  };
+  app.use(cors(corsOptions));
+  app.options("*", cors(corsOptions)); // preflight
+}
+
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -178,8 +204,8 @@ const sessionMiddleware = session({
   rolling: true, // 활동 시 만료 갱신
   cookie: {
     httpOnly: true,
-    sameSite: "lax",
-    secure: PROD,
+    sameSite: CROSS_SITE ? "none" : "lax",
+    secure: PROD || CROSS_SITE,
     path: "/",
     maxAge: MAX_AGE_MS,
   },
@@ -192,8 +218,8 @@ const csrfProtection = csrf({
   cookie: {
     key: CSRF_COOKIE_NAME,
     httpOnly: true,
-    sameSite: "lax",
-    secure: PROD,
+    sameSite: CROSS_SITE ? "none" : "lax",
+    secure: PROD || CROSS_SITE,
     path: "/",
     signed: true,
   },
@@ -383,6 +409,7 @@ function applyNameChange(req, res) {
   setUserDisplayName(req.session.uid, displayName);
 
   const u = getUserById(req.session.uid);
+  const avatarUrl = latestAvatarUrl(req.session.uid);
   return res.json({ ok:true, user:{ id:u.id, email:u.email, displayName } });
 }
 
@@ -458,9 +485,10 @@ app.post("/auth/nav", (req, res) => {
 // 명시적 로그아웃 (CSRF 필요)
 app.post("/auth/logout", csrfProtection, (req, res) => {
   const name = PROD ? "__Host-sid" : "sid";
+  const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
   const done = () => {
-    res.clearCookie(name, { path: "/", sameSite: "lax", secure: PROD });
-    res.clearCookie(CSRF_COOKIE_NAME, { path: "/", sameSite: "lax", secure: PROD });
+    res.clearCookie(name, clearOpts);
+    res.clearCookie(CSRF_COOKIE_NAME, clearOpts);
     res.json({ ok: true });
   };
   return req.session ? req.session.destroy(done) : done();
@@ -481,13 +509,13 @@ app.post("/auth/logout-beacon", (req, res) => {
   }
   const name = PROD ? "__Host-sid" : "sid";
   if (!req.session?.uid) {
-    res.clearCookie(name, { path: "/", sameSite: "lax", secure: PROD });
-    res.clearCookie(CSRF_COOKIE_NAME, { path: "/", sameSite: "lax", secure: PROD });
+    res.clearCookie(name, clearOpts);
+    res.clearCookie(CSRF_COOKIE_NAME, clearOpts);
     return res.json({ ok: true });
   }
   req.session.destroy(() => {
-    res.clearCookie(name, { path: "/", sameSite: "lax", secure: PROD });
-    res.clearCookie(CSRF_COOKIE_NAME, { path: "/", sameSite: "lax", secure: PROD });
+    res.clearCookie(name, clearOpts);
+    res.clearCookie(CSRF_COOKIE_NAME, clearOpts);
     res.json({ ok: true });
   });
 });
@@ -611,7 +639,6 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   }
 
   const u = getUserById(req.session.uid);
-  const avatarUrl = latestAvatarUrl(req.session.uid);
   return res.json({
     ok: true,
     user: u ? { id: u.id, email: u.email, displayName, avatarUrl } : null,
