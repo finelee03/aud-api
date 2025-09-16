@@ -62,7 +62,7 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 8787;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const PROD = process.env.NODE_ENV === "production";
-const SESSION_SECRET = process.env.SESSION_SECRET || "dev-secret-change-me";
+const SESSION_SECRET = process.env.SESSION_SECRET || "810b135542bc33386aa6018125d3b6df";
 const NAV_TTL_MS = Number(process.env.NAV_TTL_MS || 10000);
 
 // 최근 내비게이션 마킹
