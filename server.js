@@ -68,6 +68,14 @@ const NAV_TTL_MS = Number(process.env.NAV_TTL_MS || 10000);
 
 const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN || "";
 
+const API_ORIGINS = [
+  "https://aud-api-dtd1.onrender.com",  // Render API 실제 도메인
+];
+
+function normalizeId(raw) {
+  return String(raw || "").replace(/^[a-z]_/, ""); // g_123 → 123
+}
+
 // 최근 내비게이션 마킹
 function markNavigate(req) {
   try { req.session.navAt = Date.now(); req.session.save?.(()=>{}); } catch {}
@@ -184,8 +192,7 @@ app.use(
         "script-src": ["'self'"],
         "style-src": ["'self'", "https://fonts.googleapis.com"],
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
-        "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
-        "connect-src": ["'self'", "ws:", "wss:"],
+        "connect-src": ["'self'", ...API_ORIGINS, "ws:", "wss:"],
         "img-src": ["'self'", "data:", "blob:"],
         "media-src": ["'self'", "blob:"],
         "worker-src": ["'self'", "blob:"],
@@ -773,6 +780,91 @@ app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
   putUserState(req.session.uid, ns, state, updatedAt);
   return res.json({ ok: true });
 });
+
+// === [NEW] 공개 읽기 전용 라우터 (no-auth) ===
+const pub = express.Router();
+
+// 단일 아이템 메타 (ns 불문, 파일/인덱스에서 탐색)
+pub.get('/items/:id', (req, res) => {
+  try {
+    const id = normalizeId(req.params.id);
+    if (!id) return res.status(400).json({ ok:false, error:'bad-id' });
+
+    // 후보 ns 전체를 탐색 (현재 uid 세션이 없어도 전 ns 스캔)
+    const EXT = ['png','jpg','jpeg','webp','gif'];
+    const allNs = [];
+    try {
+      for (const d of fs.readdirSync(UPLOAD_ROOT)) {
+        const p = path.join(UPLOAD_ROOT, d);
+        try { if (d !== 'avatars' && fs.lstatSync(p).isDirectory()) allNs.push(d); } catch {}
+      }
+    } catch {}
+
+    let found = null, meta = null, ownerNs = null;
+
+    // 1) 인덱스에서 먼저 찾기
+    for (const ns of allNs) {
+      try {
+        const idxPath = path.join(UPLOAD_ROOT, ns, '_index.json');
+        const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+        if (Array.isArray(idx)) {
+          const m = idx.find(m => String(m.id) === id);
+          if (m) { meta = m; ownerNs = ns; break; }
+        }
+      } catch {}
+    }
+
+    // 2) 파일 존재 확인
+    if (ownerNs) {
+      for (const e of EXT) {
+        const fp = path.join(UPLOAD_ROOT, ownerNs, `${id}.${e}`);
+        if (fs.existsSync(fp)) {
+          found = { ext: e, mime: e==='jpg'||e==='jpeg'?'image/jpeg': e==='webp'?'image/webp': e==='gif'?'image/gif':'image/png' };
+          break;
+        }
+      }
+    } else {
+      // owner ns 못 찾으면 모든 ns에서 파일 스캔
+      outer: for (const ns of allNs) {
+        for (const e of EXT) {
+          const fp = path.join(UPLOAD_ROOT, ns, `${id}.${e}`);
+          if (fs.existsSync(fp)) { ownerNs = ns; found = { ext:e, mime: e==='jpg'||e==='jpeg'?'image/jpeg': e==='webp'?'image/webp': e==='gif'?'image/gif':'image/png' }; break outer; }
+        }
+      }
+    }
+
+    if (!ownerNs) return res.status(404).json({ ok:false, error:'not-found' });
+
+    const created_at = Number(meta?.createdAt ?? meta?.created_at ?? 0) || null;
+    const out = {
+      id,
+      ns: ownerNs,
+      label: meta?.label || '',
+      created_at, createdAt: created_at,
+      width: Number(meta?.width || 0),
+      height: Number(meta?.height || 0),
+      caption: typeof meta?.caption === 'string' ? meta.caption
+            : (typeof meta?.text === 'string' ? meta.text : ''),
+      bg: meta?.bg || meta?.bg_color || meta?.bgHex || null,
+      ext: found?.ext || meta?.ext || null,
+      mime: found?.mime || meta?.mime || null,
+    };
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok:true, ...out, item: out });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:'item-read-failed' });
+  }
+});
+
+// 갤러리 별칭: /api/gallery/:gid → items/:id로 프록시
+pub.get('/gallery/:gid', (req, res) => {
+  req.params.id = normalizeId(req.params.gid);
+  return app._router.handle({ ...req, url: `/api/items/${req.params.id}` }, res, ()=>{});
+});
+
+app.use('/api', pub);
+
 
 // ──────────────────────────────────────────────────────────
 // 소셜/피드 라우터(있으면 자동 장착) — 업로드/블랍보다 '위'
@@ -1779,8 +1871,8 @@ app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, r
     }
   }
 
-  app.get('/api/gallery/:id/blob', ensureAuth, (req, res) => serveBlob(req, res, false));
-  app.head('/api/gallery/:id/blob', ensureAuth, (req, res) => serveBlob(req, res, true));
+  app.get('/api/gallery/:id/blob', (req, res) => serveBlob(req, res, false));
+  app.head('/api/gallery/:id/blob', (req, res) => serveBlob(req, res, true));
 })();
 
 // ──────────────────────────────────────────────────────────
