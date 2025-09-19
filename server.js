@@ -163,7 +163,8 @@ if (CROSS_SITE) {
     origin(origin, cb) {
       if (!origin) return cb(null, true);
       if (!ALLOWED_ORIGINS.length) return cb(null, true);
-      cb(null, ALLOWED_ORIGINS.includes(origin));
+      const o = String(origin || "").replace(/\/$/, "").toLowerCase();
+      cb(null, ALLOWED_ORIGINS.includes(o));
     },
     credentials: true,
     methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
@@ -340,6 +341,22 @@ function latestAvatarUrl(uid) {
   } catch { return null; }
 }
 
+function cleanupOldAvatars(uid, keep = 3) {
+  try {
+    const prefix = `${uid}-`;
+    const files = fs.readdirSync(AVATAR_DIR)
+      .filter(f => f.startsWith(prefix) && /\.(webp|png|jpe?g|gif)$/i.test(f))
+      .sort((a, b) => {
+        const ta = parseInt((a.split("-")[1] || "").split(".")[0], 10) || 0;
+        const tb = parseInt((b.split("-")[1] || "").split(".")[0], 10) || 0;
+        return tb - ta; // 최신 먼저
+      });
+    for (const f of files.slice(keep)) {
+      try { fs.unlinkSync(path.join(AVATAR_DIR, f)); } catch {}
+    }
+  } catch {}
+}
+
 function getDisplayNameById(uid) {
   try {
     ensureDisplayNameColumn();
@@ -451,6 +468,7 @@ app.get("/auth/ping", (req, res) => {
 
 
 app.get("/auth/csrf", csrfProtection, (req, res) => {
+  res.set("Cache-Control", "no-store");
   return res.json({ csrfToken: req.csrfToken() });
 });
 
@@ -596,8 +614,9 @@ app.post(
   csrfProtection,
   upload.any(), // avatar | file | image 등 어떤 필드명이 와도 받게
   async (req, res) => {
-    const uid = req.session?.uid;
-    if (!uid) return res.status(401).json({ ok:false, msg:"로그인이 필요합니다." });
+    try {
+      const uid = req.session?.uid;
+      if (!uid) return res.status(401).json({ ok:false, msg:"로그인이 필요합니다." });
 
     // 1) FormData 파일 찾기 (avatar, file, image, photo 우선)
     const files = Array.isArray(req.files) ? req.files : [];
@@ -606,6 +625,11 @@ app.post(
       files[0] || null;
 
     let buf = picked?.buffer || null;
+    const allowed = new Set(["image/png","image/jpeg","image/webp","image/gif"]);
+    if (picked && picked.mimetype && !allowed.has(picked.mimetype)) {
+      return res.status(400).json({ ok:false, msg:"unsupported-type" });
+    }
+
 
     // 2) 파일이 없으면 dataURL 폴백 (avatar/dataURL/dataUrl/avatarDataURL/thumbDataURL)
     if (!buf) {
@@ -622,7 +646,7 @@ app.post(
     if (!buf) return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
 
     // 3) 정규화: 512x512 WebP
-    const outBuf = await sharp(buf)
+    const outBuf = await sharp(buf, { limitInputPixels: 10000 * 10000 }) // 100MP
       .rotate()
       .resize(512, 512, { fit: "cover" })
       .webp({ quality: 90 })
@@ -633,10 +657,13 @@ app.post(
 
     const avatarUrl = `/uploads/avatars/${filename}`;
     _avatarCache.set(String(uid), { url: avatarUrl, t: Date.now() });
+    cleanupOldAvatars(uid); // ← 여기!
     res.set("Cache-Control", "no-store");
     res.json({ ok:true, avatarUrl });
+    } catch (e) {
+    res.status(500).json({ ok:false, msg:"avatar-failed" });
   }
-);
+});
 
 
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
@@ -1309,6 +1336,9 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
     app.get('/api/items/:id', requireLogin, (req, res) => {
       try {
         const ns = getNS(req);
+        if (!ensureOwnerNs(req, ns)) {
+          return res.status(403).json({ ok:false, error:"forbidden-ns" });
+        }
         const id = String(req.params.id || '');
         if (!id) return res.status(400).json({ ok: false, error: 'bad-id' });
 
@@ -1408,13 +1438,17 @@ app.post(["/api/gallery/upload", "/api/gallery"],
     try {
       const ns = getNS(req);
       const {
-        id = `g_${Date.now()}`,
+        id: rawId = `g_${Date.now()}`,
         label = "",
         createdAt = Date.now(),
         width = 0,
         height = 0,
         thumbDataURL = "",
       } = req.body || {};
+      const id = String(rawId).trim();
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) {
+        return res.status(400).json({ ok:false, error:"bad-id" });
+      }
 
       const dir = path.join(UPLOAD_ROOT, ns);
       ensureDir(dir);
@@ -1473,7 +1507,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
       idx = idx.filter(m => String(m.id) !== id); // 중복 제거
       idx.unshift(meta);                           // 최신이 앞으로
       idx = idx.slice(0, 2000);                    // 안전한 상한
-      fs.writeFileSync(indexPath, JSON.stringify(idx));
+      writeJsonAtomic(indexPath, idx);
 
       return res.json({ ok: true, id, ext, mime });
     } catch (e) {
