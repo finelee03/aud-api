@@ -474,28 +474,24 @@ app.get("/auth/csrf", csrfProtection, (req, res) => {
 
 app.post("/auth/signup", csrfProtection, async (req, res) => {
   const parsed = EmailPw.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok: false, error: "INVALID" });
+  if (!parsed.success) return res.status(400).json({ ok:false, error:"INVALID" });
 
   const { email, password } = parsed.data;
-  const hash = await argon2.hash(password, {
-    type: argon2.argon2id,
-    memoryCost: 65536,
-    timeCost: 3,
-    parallelism: 1,
-  });
+  const hash = await argon2.hash(password, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
 
   try {
     const userId = createUser(email.toLowerCase(), hash);
-  try {
+    try {
       ensureDisplayNameColumn();
       const name = sanitizeDisplayNameFromEmail(email);
       setUserDisplayName(userId, name);
     } catch {}
-    return res.status(201).json({ ok: true, id: userId });
+    return res.status(201).json({ ok:true, id: userId });
   } catch (e) {
-    return res.status(409).json({ ok: false, error: "DUPLICATE_EMAIL" });
+    return res.status(409).json({ ok:false, error:"DUPLICATE_EMAIL" });
   }
 });
+
 
 app.post("/auth/login", csrfProtection, async (req, res) => {
   const parsed = EmailPw.safeParse(req.body);
