@@ -28,6 +28,8 @@ const {
   putUserState,
 } = require("./db");
 
+const { startBleBridge } = require("./ble-bridge");
+
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
@@ -66,16 +68,6 @@ const PROD = process.env.NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || "810b135542bc33386aa6018125d3b6df";
 const NAV_TTL_MS = Number(process.env.NAV_TTL_MS || 10000);
 
-const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN || "";
-
-const API_ORIGINS = [
-  "https://aud-api-dtd1.onrender.com",  // Render API 실제 도메인
-];
-
-function normalizeId(raw) {
-  return String(raw || "").replace(/^[a-z]_/, ""); // g_123 → 123
-}
-
 // 최근 내비게이션 마킹
 function markNavigate(req) {
   try { req.session.navAt = Date.now(); req.session.save?.(()=>{}); } catch {}
@@ -100,16 +92,6 @@ function mountIfExists(basePath, mountPath = "/api") {
       console.log(`[router] error mounting ${basePath}:`, e?.message || e);
     }
   }
-}
-
-function sanitizeDisplayNameFromEmail(email) {
-  const local = String(email || "").split("@")[0] || "member";
-  // 영문/숫자/._-과 공백만 남기고, 공백은 1칸으로 압축, 길이 제한
-  return local
-    .replace(/[^a-zA-Z0-9._\- ]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 40) || "member";
 }
 
 // ──────────────────────────────────────────────────────────
@@ -171,8 +153,7 @@ if (CROSS_SITE) {
     origin(origin, cb) {
       if (!origin) return cb(null, true);
       if (!ALLOWED_ORIGINS.length) return cb(null, true);
-      const o = String(origin || "").replace(/\/$/, "").toLowerCase();
-      cb(null, ALLOWED_ORIGINS.includes(o));
+      cb(null, ALLOWED_ORIGINS.includes(origin));
     },
     credentials: true,
     methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
@@ -192,7 +173,8 @@ app.use(
         "script-src": ["'self'"],
         "style-src": ["'self'", "https://fonts.googleapis.com"],
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
-        "connect-src": ["'self'", ...API_ORIGINS, "ws:", "wss:"],
+        "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
+        "connect-src": ["'self'", "ws:", "wss:"],
         "img-src": ["'self'", "data:", "blob:"],
         "media-src": ["'self'", "blob:"],
         "worker-src": ["'self'", "blob:"],
@@ -207,7 +189,6 @@ app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser(SESSION_SECRET)); // CSRF(cookie 모드) 서명용
 app.use(compression());                // 응답 압축
-
 
 // 세션
 const SqliteStore = SqliteStoreFactory(session);
@@ -348,22 +329,6 @@ function latestAvatarUrl(uid) {
   } catch { return null; }
 }
 
-function cleanupOldAvatars(uid, keep = 3) {
-  try {
-    const prefix = `${uid}-`;
-    const files = fs.readdirSync(AVATAR_DIR)
-      .filter(f => f.startsWith(prefix) && /\.(webp|png|jpe?g|gif)$/i.test(f))
-      .sort((a, b) => {
-        const ta = parseInt((a.split("-")[1] || "").split(".")[0], 10) || 0;
-        const tb = parseInt((b.split("-")[1] || "").split(".")[0], 10) || 0;
-        return tb - ta; // 최신 먼저
-      });
-    for (const f of files.slice(keep)) {
-      try { fs.unlinkSync(path.join(AVATAR_DIR, f)); } catch {}
-    }
-  } catch {}
-}
-
 function getDisplayNameById(uid) {
   try {
     ensureDisplayNameColumn();
@@ -475,30 +440,28 @@ app.get("/auth/ping", (req, res) => {
 
 
 app.get("/auth/csrf", csrfProtection, (req, res) => {
-  res.set("Cache-Control", "no-store");
   return res.json({ csrfToken: req.csrfToken() });
 });
 
 app.post("/auth/signup", csrfProtection, async (req, res) => {
   const parsed = EmailPw.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok:false, error:"INVALID" });
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "INVALID" });
 
   const { email, password } = parsed.data;
-  const hash = await argon2.hash(password, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 });
+  const hash = await argon2.hash(password, {
+    type: argon2.argon2id,
+    memoryCost: 65536,
+    timeCost: 3,
+    parallelism: 1,
+  });
 
   try {
     const userId = createUser(email.toLowerCase(), hash);
-    try {
-      ensureDisplayNameColumn();
-      const name = sanitizeDisplayNameFromEmail(email);
-      setUserDisplayName(userId, name);
-    } catch {}
-    return res.status(201).json({ ok:true, id: userId });
+    return res.status(201).json({ ok: true, id: userId });
   } catch (e) {
-    return res.status(409).json({ ok:false, error:"DUPLICATE_EMAIL" });
+    return res.status(409).json({ ok: false, error: "DUPLICATE_EMAIL" });
   }
 });
-
 
 app.post("/auth/login", csrfProtection, async (req, res) => {
   const parsed = EmailPw.safeParse(req.body);
@@ -510,15 +473,6 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
 
   const ok = await argon2.verify(row.pwHash ?? row.pw_hash, password);
   if (!ok) return res.status(400).json({ ok: false, error: "BAD_CREDENTIALS" });
-
-  try {
-    const curr = getDisplayNameById(row.id);
-    if (!curr || !String(curr).trim()) {
-      ensureDisplayNameColumn();
-      setUserDisplayName(row.id, sanitizeDisplayNameFromEmail(row.email));
-    }
-  } catch {}
-
 
   req.session.regenerate((err) => {
     if (err) return res.status(500).json({ ok: false });
@@ -547,32 +501,18 @@ app.post("/auth/logout", csrfProtection, (req, res) => {
 
 // 마지막 탭 종료/비콘 로그아웃 (CSRF 없음)
 app.post("/auth/logout-beacon", (req, res) => {
-  const origin = (req.get("origin") || "").replace(/\/$/, "").toLowerCase();
-  const host   = (req.get("host") || "").toLowerCase();
+  const origin = req.get("origin");
+  const host = req.get("host");
   const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
-
-  // Allow same-origin OR any origin explicitly allowed via CORS ALLOWED_ORIGINS
   if (origin) {
     try {
       const u = new URL(origin);
-      const o = (u.origin || origin).replace(/\/$/, "").toLowerCase();
-      if (ALLOWED_ORIGINS.length) {
-        if (!ALLOWED_ORIGINS.includes(o)) {
-          return res.status(403).json({ ok: false, reason: "origin-not-allowed" });
-        }
-      } else if (u.host !== host) {
-        // When no ALLOWED_ORIGINS configured, require same host
-        return res.status(403).json({ ok: false, reason: "cross-origin-blocked" });
-      }
-    } catch {
-      // malformed origin → allow only if same host (by falling through without early return)
-    }
+      if (u.host !== host) return res.status(403).json({ ok: false });
+    } catch { /* malformed origin → 동오리진만 도달하므로 허용 */ }
   }
-
   if (isRecentNavigate(req)) {
     return res.json({ ok: true, skipped: "recent-nav" });
   }
-
   const name = PROD ? "__Host-sid" : "sid";
   if (!req.session?.uid) {
     res.clearCookie(name, clearOpts);
@@ -617,9 +557,8 @@ app.post(
   csrfProtection,
   upload.any(), // avatar | file | image 등 어떤 필드명이 와도 받게
   async (req, res) => {
-    try {
-      const uid = req.session?.uid;
-      if (!uid) return res.status(401).json({ ok:false, msg:"로그인이 필요합니다." });
+    const uid = req.session?.uid;
+    if (!uid) return res.status(401).json({ ok:false, msg:"로그인이 필요합니다." });
 
     // 1) FormData 파일 찾기 (avatar, file, image, photo 우선)
     const files = Array.isArray(req.files) ? req.files : [];
@@ -628,11 +567,6 @@ app.post(
       files[0] || null;
 
     let buf = picked?.buffer || null;
-    const allowed = new Set(["image/png","image/jpeg","image/webp","image/gif"]);
-    if (picked && picked.mimetype && !allowed.has(picked.mimetype)) {
-      return res.status(400).json({ ok:false, msg:"unsupported-type" });
-    }
-
 
     // 2) 파일이 없으면 dataURL 폴백 (avatar/dataURL/dataUrl/avatarDataURL/thumbDataURL)
     if (!buf) {
@@ -649,7 +583,7 @@ app.post(
     if (!buf) return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
 
     // 3) 정규화: 512x512 WebP
-    const outBuf = await sharp(buf, { limitInputPixels: 10000 * 10000 }) // 100MP
+    const outBuf = await sharp(buf)
       .rotate()
       .resize(512, 512, { fit: "cover" })
       .webp({ quality: 90 })
@@ -660,13 +594,10 @@ app.post(
 
     const avatarUrl = `/uploads/avatars/${filename}`;
     _avatarCache.set(String(uid), { url: avatarUrl, t: Date.now() });
-    cleanupOldAvatars(uid); // ← 여기!
     res.set("Cache-Control", "no-store");
     res.json({ ok:true, avatarUrl });
-    } catch (e) {
-    res.status(500).json({ ok:false, msg:"avatar-failed" });
   }
-});
+);
 
 
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
@@ -781,99 +712,12 @@ app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
   return res.json({ ok: true });
 });
 
-// === [NEW] 공개 읽기 전용 라우터 (no-auth) ===
-const pub = express.Router();
-
-// 단일 아이템 메타 (ns 불문, 파일/인덱스에서 탐색)
-pub.get('/items/:id', (req, res) => {
-  try {
-    const id = normalizeId(req.params.id);
-    if (!id) return res.status(400).json({ ok:false, error:'bad-id' });
-
-    // 후보 ns 전체를 탐색 (현재 uid 세션이 없어도 전 ns 스캔)
-    const EXT = ['png','jpg','jpeg','webp','gif'];
-    const allNs = [];
-    try {
-      for (const d of fs.readdirSync(UPLOAD_ROOT)) {
-        const p = path.join(UPLOAD_ROOT, d);
-        try { if (d !== 'avatars' && fs.lstatSync(p).isDirectory()) allNs.push(d); } catch {}
-      }
-    } catch {}
-
-    let found = null, meta = null, ownerNs = null;
-
-    // 1) 인덱스에서 먼저 찾기
-    for (const ns of allNs) {
-      try {
-        const idxPath = path.join(UPLOAD_ROOT, ns, '_index.json');
-        const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
-        if (Array.isArray(idx)) {
-          const m = idx.find(m => String(m.id) === id);
-          if (m) { meta = m; ownerNs = ns; break; }
-        }
-      } catch {}
-    }
-
-    // 2) 파일 존재 확인
-    if (ownerNs) {
-      for (const e of EXT) {
-        const fp = path.join(UPLOAD_ROOT, ownerNs, `${id}.${e}`);
-        if (fs.existsSync(fp)) {
-          found = { ext: e, mime: e==='jpg'||e==='jpeg'?'image/jpeg': e==='webp'?'image/webp': e==='gif'?'image/gif':'image/png' };
-          break;
-        }
-      }
-    } else {
-      // owner ns 못 찾으면 모든 ns에서 파일 스캔
-      outer: for (const ns of allNs) {
-        for (const e of EXT) {
-          const fp = path.join(UPLOAD_ROOT, ns, `${id}.${e}`);
-          if (fs.existsSync(fp)) { ownerNs = ns; found = { ext:e, mime: e==='jpg'||e==='jpeg'?'image/jpeg': e==='webp'?'image/webp': e==='gif'?'image/gif':'image/png' }; break outer; }
-        }
-      }
-    }
-
-    if (!ownerNs) return res.status(404).json({ ok:false, error:'not-found' });
-
-    const created_at = Number(meta?.createdAt ?? meta?.created_at ?? 0) || null;
-    const out = {
-      id,
-      ns: ownerNs,
-      label: meta?.label || '',
-      created_at, createdAt: created_at,
-      width: Number(meta?.width || 0),
-      height: Number(meta?.height || 0),
-      caption: typeof meta?.caption === 'string' ? meta.caption
-            : (typeof meta?.text === 'string' ? meta.text : ''),
-      bg: meta?.bg || meta?.bg_color || meta?.bgHex || null,
-      ext: found?.ext || meta?.ext || null,
-      mime: found?.mime || meta?.mime || null,
-    };
-
-    res.set('Cache-Control', 'no-store');
-    return res.json({ ok:true, ...out, item: out });
-  } catch (e) {
-    return res.status(500).json({ ok:false, error:'item-read-failed' });
-  }
-});
-
-// 갤러리 별칭: /api/gallery/:gid → items/:id로 프록시
-pub.get('/gallery/:gid', (req, res) => {
-  req.params.id = normalizeId(req.params.gid);
-  return app._router.handle({ ...req, url: `/api/items/${req.params.id}` }, res, ()=>{});
-});
-
-app.use('/api', pub);
-
-
 // ──────────────────────────────────────────────────────────
 // 소셜/피드 라우터(있으면 자동 장착) — 업로드/블랍보다 '위'
 // ──────────────────────────────────────────────────────────
 mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 mountIfExists("./routes/comments.routes");  // 댓글 CRUD
-mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
-
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
 
@@ -999,8 +843,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         db.prepare('INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)')
           .run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
-        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, by: uid, ts: Date.now() });
-        io.to(`user:${uid}`).emit('item:like', { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
+        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
+        io.emit('item:like',         { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
         res.json({ ok: true, liked: true, likes: n });
       } catch { res.status(500).json({ ok: false }); }
     });
@@ -1013,8 +857,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         const ns  = getNS(req);
         db.prepare('DELETE FROM item_likes WHERE item_id=? AND user_id=?').run(id, uid);
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
-        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, by: uid, ts: Date.now() });
-        io.to(`user:${uid}`).emit('item:like', { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
+        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
+        io.emit('item:like',         { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
         res.json({ ok: true, liked: false, likes: n });
       } catch { res.status(500).json({ ok: false }); }
     });
@@ -1024,7 +868,7 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
   // 공개 갤러리 (여러 ns 통합) — 하드닝 버전
   // =========================================================
   if (!hasRouteDeep('get', '/gallery/public') || process.env.FORCE_FALLBACK_PUBLIC === '1') {
-    app.get('/api/gallery/public', (req, res) => {
+    app.get('/api/gallery/public', requireLogin, (req, res) => {
       res.set('Cache-Control', 'no-store');
       try {
         const limit = Math.min(Number(req.query.limit) || 12, 60);
@@ -1168,8 +1012,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
         const itemId = _itemIdOfComment(cid);
         if (itemId) {
-          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
-          io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:true, by:uid, ts:Date.now() });
+          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
+          io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
         }
         res.json({ ok:true, liked:true, likes:n });
       } catch { res.status(500).json({ ok:false }); }
@@ -1185,8 +1029,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
         const itemId = _itemIdOfComment(cid);
         if (itemId) {
-          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
-          io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
+          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
+          io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
         }
         res.json({ ok:true, liked:false, likes:n });
       } catch { res.status(500).json({ ok:false }); }
@@ -1208,8 +1052,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
           .run(cid, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
 
-        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
-        io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:true, by:uid, ts:Date.now() });
+        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
+        io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
         res.json({ ok:true, liked:true, likes:n });
       } catch { res.status(500).json({ ok:false }); }
     });
@@ -1227,8 +1071,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         db.prepare('DELETE FROM comment_likes WHERE comment_id=? AND user_id=?').run(cid, uid);
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
 
-        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
-        io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
+        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
+        io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
         res.json({ ok:true, liked:false, likes:n });
       } catch { res.status(500).json({ ok:false }); }
     });
@@ -1424,9 +1268,6 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
     app.get('/api/items/:id', requireLogin, (req, res) => {
       try {
         const ns = getNS(req);
-        if (!ensureOwnerNs(req, ns)) {
-          return res.status(403).json({ ok:false, error:"forbidden-ns" });
-        }
         const id = String(req.params.id || '');
         if (!id) return res.status(400).json({ ok: false, error: 'bad-id' });
 
@@ -1526,17 +1367,13 @@ app.post(["/api/gallery/upload", "/api/gallery"],
     try {
       const ns = getNS(req);
       const {
-        id: rawId = `g_${Date.now()}`,
+        id = `g_${Date.now()}`,
         label = "",
         createdAt = Date.now(),
         width = 0,
         height = 0,
         thumbDataURL = "",
       } = req.body || {};
-      const id = String(rawId).trim();
-      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) {
-        return res.status(400).json({ ok:false, error:"bad-id" });
-      }
 
       const dir = path.join(UPLOAD_ROOT, ns);
       ensureDir(dir);
@@ -1595,7 +1432,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
       idx = idx.filter(m => String(m.id) !== id); // 중복 제거
       idx.unshift(meta);                           // 최신이 앞으로
       idx = idx.slice(0, 2000);                    // 안전한 상한
-      writeJsonAtomic(indexPath, idx);
+      fs.writeFileSync(indexPath, JSON.stringify(idx));
 
       return res.json({ ok: true, id, ext, mime });
     } catch (e) {
@@ -1871,8 +1708,8 @@ app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, r
     }
   }
 
-  app.get('/api/gallery/:id/blob', (req, res) => serveBlob(req, res, false));
-  app.head('/api/gallery/:id/blob', (req, res) => serveBlob(req, res, true));
+  app.get('/api/gallery/:id/blob', ensureAuth, (req, res) => serveBlob(req, res, false));
+  app.head('/api/gallery/:id/blob', ensureAuth, (req, res) => serveBlob(req, res, true));
 })();
 
 // ──────────────────────────────────────────────────────────
@@ -1884,8 +1721,6 @@ app.get("/", (_, res) => res.sendFile(path.join(PUBLIC_DIR, "home.html")));
 // ──────────────────────────────────────────────────────────
 io.engine.use(sessionMiddleware);
 io.on("connection", (sock) => {
-  const uid = sock.request?.session?.uid;
-  if (uid) sock.join(`user:${uid}`);
   sock.on("subscribe", (payload) => {
     const labels = Array.isArray(payload?.labels)
       ? payload.labels
@@ -1936,9 +1771,15 @@ server.listen(PORT, () => {
   if (!PROD) printRoutesSafe();
 
   // BLE 브리지 초기화(실패해도 서버는 계속)
-  console.log("[ble] using gateway uplink: POST /gateway/ble");
+  try {
+    if (typeof startBleBridge === "function") {
+      startBleBridge(io, { companyIdLE: 0xFFFF, log: true });
+      console.log("[ble] bridge started");
+    } else {
+      console.log("[ble] startBleBridge not available");
+    }
+  } catch (e) {
+    console.log("[ble] bridge failed to start:", e?.message || e);
+  }
 });
 
-
-// BLE Gateway uplink route
-require("./routes/gateway.routes")(app, io);
