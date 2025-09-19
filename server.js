@@ -1024,7 +1024,7 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
   // 공개 갤러리 (여러 ns 통합) — 하드닝 버전
   // =========================================================
   if (!hasRouteDeep('get', '/gallery/public') || process.env.FORCE_FALLBACK_PUBLIC === '1') {
-    app.get('/api/gallery/public', requireLogin, (req, res) => {
+    app.get('/api/gallery/public', (req, res) => {
       res.set('Cache-Control', 'no-store');
       try {
         const limit = Math.min(Number(req.query.limit) || 12, 60);
