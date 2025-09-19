@@ -911,8 +911,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         db.prepare('INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)')
           .run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
-        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
-        io.emit('item:like',         { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
+        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, by: uid, ts: Date.now() });
+        io.to(`user:${uid}`).emit('item:like', { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
         res.json({ ok: true, liked: true, likes: n });
       } catch { res.status(500).json({ ok: false }); }
     });
@@ -925,8 +925,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         const ns  = getNS(req);
         db.prepare('DELETE FROM item_likes WHERE item_id=? AND user_id=?').run(id, uid);
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
-        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
-        io.emit('item:like',         { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
+        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, by: uid, ts: Date.now() });
+        io.to(`user:${uid}`).emit('item:like', { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
         res.json({ ok: true, liked: false, likes: n });
       } catch { res.status(500).json({ ok: false }); }
     });
@@ -1080,8 +1080,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
         const itemId = _itemIdOfComment(cid);
         if (itemId) {
-          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
-          io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
+          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
+          io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:true, by:uid, ts:Date.now() });
         }
         res.json({ ok:true, liked:true, likes:n });
       } catch { res.status(500).json({ ok:false }); }
@@ -1097,8 +1097,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
         const itemId = _itemIdOfComment(cid);
         if (itemId) {
-          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
-          io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
+          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
+          io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
         }
         res.json({ ok:true, liked:false, likes:n });
       } catch { res.status(500).json({ ok:false }); }
@@ -1120,8 +1120,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
           .run(cid, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
 
-        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
-        io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
+        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
+        io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:true, by:uid, ts:Date.now() });
         res.json({ ok:true, liked:true, likes:n });
       } catch { res.status(500).json({ ok:false }); }
     });
@@ -1139,8 +1139,8 @@ mountIfExists("./routes/nfc.routes");       // NFC UID↔Label 매핑 API
         db.prepare('DELETE FROM comment_likes WHERE comment_id=? AND user_id=?').run(cid, uid);
         const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
 
-        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
-        io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
+        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, by:uid, ts:Date.now() });
+        io.to(`user:${uid}`).emit('comment:like',     { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
         res.json({ ok:true, liked:false, likes:n });
       } catch { res.status(500).json({ ok:false }); }
     });
@@ -1796,6 +1796,8 @@ app.get("/", (_, res) => res.sendFile(path.join(PUBLIC_DIR, "home.html")));
 // ──────────────────────────────────────────────────────────
 io.engine.use(sessionMiddleware);
 io.on("connection", (sock) => {
+  const uid = sock.request?.session?.uid;
+  if (uid) sock.join(`user:${uid}`);
   sock.on("subscribe", (payload) => {
     const labels = Array.isArray(payload?.labels)
       ? payload.labels
