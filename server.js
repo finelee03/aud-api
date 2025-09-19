@@ -94,6 +94,16 @@ function mountIfExists(basePath, mountPath = "/api") {
   }
 }
 
+function sanitizeDisplayNameFromEmail(email) {
+  const local = String(email || "").split("@")[0] || "member";
+  // 영문/숫자/._-과 공백만 남기고, 공백은 1칸으로 압축, 길이 제한
+  return local
+    .replace(/[^a-zA-Z0-9._\- ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 40) || "member";
+}
+
 // ──────────────────────────────────────────────────────────
 // 업로드 준비 (메모리 → 디스크 저장)
 // ──────────────────────────────────────────────────────────
@@ -458,6 +468,11 @@ app.post("/auth/signup", csrfProtection, async (req, res) => {
 
   try {
     const userId = createUser(email.toLowerCase(), hash);
+  try {
+      ensureDisplayNameColumn();
+      const name = sanitizeDisplayNameFromEmail(email);
+      setUserDisplayName(userId, name);
+    } catch {}
     return res.status(201).json({ ok: true, id: userId });
   } catch (e) {
     return res.status(409).json({ ok: false, error: "DUPLICATE_EMAIL" });
@@ -474,6 +489,15 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
 
   const ok = await argon2.verify(row.pwHash ?? row.pw_hash, password);
   if (!ok) return res.status(400).json({ ok: false, error: "BAD_CREDENTIALS" });
+
+  try {
+    const curr = getDisplayNameById(row.id);
+    if (!curr || !String(curr).trim()) {
+      ensureDisplayNameColumn();
+      setUserDisplayName(row.id, sanitizeDisplayNameFromEmail(row.email));
+    }
+  } catch {}
+
 
   req.session.regenerate((err) => {
     if (err) return res.status(500).json({ ok: false });
