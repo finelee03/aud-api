@@ -39,20 +39,25 @@ fs.mkdirSync(AVATAR_DIR, { recursive: true });
 const BOOT_ID = uuid();
 const app = express();
 const server = http.createServer(app);
+
 // Frontend가 다른 오리진(예: GitHub Pages)일 때 CORS 허용
 const CROSS_SITE = /^(1|true|yes|on)$/i.test(process.env.CROSS_SITE || "");
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map(s => s.trim().replace(/\/$/, "").toLowerCase())
   .filter(Boolean);
+
+// CSP: connect-src 동적 구성 (self + ws/wss + 허용 오리진)
+const connectSrc = ["'self'", "ws:", "wss:", ...ALLOWED_ORIGINS];
+
 const ENABLE_IO_CORS = CROSS_SITE || ALLOWED_ORIGINS.length > 0;
 const io = new Server(server, {
   path: "/socket.io",
   ...(ENABLE_IO_CORS && {
     cors: {
       origin(origin, cb) {
-        if (!origin) return cb(null, true);                 // curl, 서버-서버
-        if (!ALLOWED_ORIGINS.length) return cb(null, true); // 미설정 → 허용
+        if (!origin) return cb(null, true);
+        if (!ALLOWED_ORIGINS.length) return cb(null, true);
         const o = String(origin || "").replace(/\/$/, "").toLowerCase();
         cb(null, !ALLOWED_ORIGINS.length || ALLOWED_ORIGINS.includes(o));
       },
@@ -174,7 +179,7 @@ app.use(
         "style-src": ["'self'", "https://fonts.googleapis.com"],
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
-        "connect-src": ["'self'", "ws:", "wss:"],
+        "connect-src": connectSrc,
         "img-src": ["'self'", "data:", "blob:"],
         "media-src": ["'self'", "blob:"],
         "worker-src": ["'self'", "blob:"],
@@ -970,21 +975,30 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           cmtCnt  = db.prepare('SELECT COUNT(*) n FROM item_comments WHERE item_id=?');
         } catch {}
 
+        const authors = new Set();
         for (const it of slice) {
-          try { it.likes    = Number(likeCnt?.get(it.id)?.n ?? 0); } catch { it.likes = 0; }
-          try { it.comments = Number(cmtCnt ?.get(it.id)?.n ?? 0); } catch { it.comments = 0; }
-          try { it.liked    = !!likedMe ?.get(it.id, uid);        } catch { it.liked = false; }
+          const ownerId = Number(it.ns);
+          if (Number.isFinite(ownerId)) authors.add(`id:${ownerId}`);
+          else if (it.ns) authors.add(`email:${String(it.ns).toLowerCase()}`);
+        }
 
-          try {
-            const ownerId  = Number(it.ns);
-            const ownerRow = Number.isFinite(ownerId) ? getUserById(ownerId) : getUserByEmail?.(it.ns);
-            if (ownerRow) {
-              it.user = publicUserShape(req.session?.uid, ownerRow);
-            } else {
-              it.user = { id: it.ns, displayName: null, avatarUrl: null };
-            }
-            it.mine = String(it.ns).toLowerCase() === String(uid).toLowerCase();
-          } catch { it.user = { id: it.ns }; it.mine = false; }
+        const authorMap = new Map();
+        for (const key of authors) {
+          if (key.startsWith('id:')) {
+            const uid = Number(key.slice(3));
+            const row = getUserById(uid);
+            authorMap.set(key, row ? publicUserShape(req.session?.uid, row) : null);
+          } else {
+            const email = key.slice(6);
+            const row = getUserByEmail?.(email);
+            authorMap.set(key, row ? publicUserShape(req.session?.uid, row) : null);
+          }
+        }
+
+        for (const it of slice) {
+          const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
+          it.user = authorMap.get(key) || { id: it.ns, displayName: null, avatarUrl: null };
+          it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
         }
 
         const next = (all.length > limit && slice.length)
@@ -1325,13 +1339,13 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         // owner info + mine flag
         try {
           const myns = String(req.session?.uid || '').toLowerCase();
-          const ownerId = Number(ns);
+          const ownerId  = Number(ns);
           const ownerRow = Number.isFinite(ownerId) ? getUserById(ownerId) : null;
           out.user = ownerRow
             ? publicUserShape(req.session?.uid, ownerRow)
             : { id: ns, displayName: null, avatarUrl: null };
-                    out.mine = (ns && ns.toLowerCase() === myns);
-                  } catch {}
+          out.mine = !!(ns && ns.toLowerCase() === myns);
+        } catch {}
         res.set('Cache-Control', 'no-store');
         return res.json({ ok: true, ...out, item: out });
       } catch (e) {
@@ -1432,7 +1446,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
       idx = idx.filter(m => String(m.id) !== id); // 중복 제거
       idx.unshift(meta);                           // 최신이 앞으로
       idx = idx.slice(0, 2000);                    // 안전한 상한
-      fs.writeFileSync(indexPath, JSON.stringify(idx));
+      writeJsonAtomic(indexPath, idx);
 
       return res.json({ ok: true, id, ext, mime });
     } catch (e) {
@@ -1582,7 +1596,7 @@ function ensureOwnerNs(req, ns) {
   const email = String(getUserById(req.session?.uid || 0)?.email || '').toLowerCase();
   ns = String(ns || '').toLowerCase();
   if (!ns) return false;
-  const variants = [uid, email, `user:${uid}`, email ? `user:${email}` : null].filter(Boolean);
+  const variants = [uid, email, `user:${uid}`].filter(Boolean); // ★ email 변형의 user: 접두 삭제
   return variants.includes(ns);
 }
 

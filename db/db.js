@@ -1,39 +1,44 @@
 // db.js
 // ─────────────────────────────────────────────────────────────
 // Single source of truth for SQLite access & app data models.
-// - Users table: id/email/pw_hash
+// - Users table: id / email / pw_hash / display_name / avatar_url
 // - User states: (user_id, ns) → JSON state with updated_at
 // - Ready for express-session store sharing (same DB file OK)
 // ─────────────────────────────────────────────────────────────
+
 const path = require("path");
 const Sqlite = require("better-sqlite3");
 
-// DB 파일 경로: 필요 시 .env의 DB_PATH로 교체
+// ─────────────────────────────────────────────────────────────
+// DB Open & Pragmas
+// ─────────────────────────────────────────────────────────────
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "app.db");
 const db = new Sqlite(DB_PATH);
 
 // 성능/안정성 권장 설정
-db.pragma("journal_mode = WAL");   // 동시성 향상
-db.pragma("foreign_keys = ON");    // FK 무결성
-db.pragma("synchronous = NORMAL"); // WAL과 궁합
-db.pragma("busy_timeout = 5000"); // 경합시 5초까지 대기
+db.pragma("journal_mode = WAL");    // 동시성 향상
+db.pragma("foreign_keys = ON");     // FK 무결성
+db.pragma("synchronous = NORMAL");  // WAL과 궁합
+db.pragma("busy_timeout = 5000");   // 경합 시 5초 대기
 
 // ─────────────────────────────────────────────────────────────
-// Schema
+// Schema (최신 스키마 기준으로 CREATE)
 // ─────────────────────────────────────────────────────────────
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  email      TEXT    NOT NULL UNIQUE,     -- lowercased
-  pw_hash    TEXT    NOT NULL,
-  created_at INTEGER NOT NULL
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  email         TEXT    NOT NULL UNIQUE,     -- stored lowercased
+  pw_hash       TEXT    NOT NULL,
+  created_at    INTEGER NOT NULL,
+  display_name  TEXT,
+  avatar_url    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS user_states (
-  user_id    INTEGER NOT NULL,
-  ns         TEXT    NOT NULL,            -- namespace (e.g., user.id or custom)
-  state_json TEXT    NOT NULL,            -- serialized JSON
-  updated_at INTEGER NOT NULL,
+  user_id     INTEGER NOT NULL,
+  ns          TEXT    NOT NULL,              -- namespace (e.g., email or custom)
+  state_json  TEXT    NOT NULL,              -- serialized JSON
+  updated_at  INTEGER NOT NULL,
   PRIMARY KEY (user_id, ns),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -43,19 +48,61 @@ ON user_states (updated_at DESC);
 `);
 
 // ─────────────────────────────────────────────────────────────
-/** Prepared statements */
+// One-time migrations (구버전 DB 대응)
+//  - 구 DB에 display_name, avatar_url 컬럼이 없을 수 있으니 보강
+// ─────────────────────────────────────────────────────────────
+function columnExists(table, col) {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all();
+    return rows.some(r => r.name === col);
+  } catch {
+    return false;
+  }
+}
+
+if (!columnExists("users", "display_name")) {
+  db.exec(`ALTER TABLE users ADD COLUMN display_name TEXT`);
+}
+if (!columnExists("users", "avatar_url")) {
+  db.exec(`ALTER TABLE users ADD COLUMN avatar_url TEXT`);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Helpers (정규화)
+// ─────────────────────────────────────────────────────────────
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function normalizeNS(ns) {
+  return String(ns || "").trim().toLowerCase();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Prepared Statements
 // ─────────────────────────────────────────────────────────────
 const stmtInsertUser = db.prepare(`
-  INSERT INTO users (email, pw_hash, created_at)
-  VALUES (LOWER(?), ?, ?)
+  INSERT INTO users (email, pw_hash, created_at, display_name, avatar_url)
+  VALUES (LOWER(?), ?, ?, NULL, NULL)
 `);
+
 const stmtGetUserByEmail = db.prepare(`
-  SELECT id, email, pw_hash, created_at
-  FROM users WHERE email = LOWER(?)
+  SELECT id, email, pw_hash, created_at, display_name, avatar_url
+  FROM users
+  WHERE email = LOWER(?)
 `);
+
 const stmtGetUserById = db.prepare(`
-  SELECT id, email, pw_hash, created_at
-  FROM users WHERE id = ?
+  SELECT id, email, pw_hash, created_at, display_name, avatar_url
+  FROM users
+  WHERE id = ?
+`);
+
+const stmtUpdateProfile = db.prepare(`
+  UPDATE users
+  SET display_name = COALESCE(?, display_name),
+      avatar_url   = COALESCE(?, avatar_url)
+  WHERE id = ?
 `);
 
 const stmtGetState = db.prepare(`
@@ -63,6 +110,7 @@ const stmtGetState = db.prepare(`
   FROM user_states
   WHERE user_id = ? AND ns = ?
 `);
+
 const stmtPutState = db.prepare(`
   INSERT INTO user_states (user_id, ns, state_json, updated_at)
   VALUES (?, ?, ?, ?)
@@ -70,12 +118,14 @@ const stmtPutState = db.prepare(`
     state_json = excluded.state_json,
     updated_at = excluded.updated_at
 `);
+
 const stmtListNamespaces = db.prepare(`
   SELECT ns, updated_at
   FROM user_states
   WHERE user_id = ?
   ORDER BY updated_at DESC
 `);
+
 const stmtDeleteState = db.prepare(`
   DELETE FROM user_states
   WHERE user_id = ? AND ns = ?
@@ -88,24 +138,27 @@ const stmtDeleteState = db.prepare(`
 /**
  * Create user (email must be unique & already validated).
  * @param {string} email - user email (will be lowercased)
- * @param {string} pwHash - argon2 hash or similar
+ * @param {string} pwHash - password hash (e.g., argon2)
  * @returns {number} user id (lastInsertRowid)
  */
 function createUser(email, pwHash) {
   const createdAt = Date.now();
-  const info = stmtInsertUser.run(email, pwHash, createdAt);
+  const normEmail = normalizeEmail(email);
+  const info = stmtInsertUser.run(normEmail, pwHash, createdAt);
   return Number(info.lastInsertRowid);
 }
 
 /** @param {string} email */
 function getUserByEmail(email) {
-  const row = stmtGetUserByEmail.get(email);
+  const row = stmtGetUserByEmail.get(normalizeEmail(email));
   if (!row) return null;
   return {
     id: row.id,
     email: row.email,
     pwHash: row.pw_hash,
     createdAt: row.created_at,
+    displayName: row.display_name || null,
+    avatarUrl: row.avatar_url || null,
   };
 }
 
@@ -118,7 +171,21 @@ function getUserById(id) {
     email: row.email,
     pwHash: row.pw_hash,
     createdAt: row.created_at,
+    displayName: row.display_name || null,
+    avatarUrl: row.avatar_url || null,
   };
+}
+
+/**
+ * Update profile fields (partial update).
+ * - null/undefined는 기존 값 유지(COALESCE)
+ * @param {number} userId
+ * @param {{displayName?: string|null, avatarUrl?: string|null}} patch
+ * @returns {true}
+ */
+function updateUserProfile(userId, { displayName = null, avatarUrl = null } = {}) {
+  stmtUpdateProfile.run(displayName ?? null, avatarUrl ?? null, userId);
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -132,7 +199,8 @@ function getUserById(id) {
  * @returns {{state: any, updatedAt: number} | null}
  */
 function getUserState(userId, ns) {
-  const row = stmtGetState.get(userId, String(ns));
+  const key = normalizeNS(ns);
+  const row = stmtGetState.get(userId, key);
   if (!row) return null;
   let state = null;
   try { state = JSON.parse(row.state_json); } catch {}
@@ -148,18 +216,20 @@ function getUserState(userId, ns) {
  * @returns {true}
  */
 function putUserState(userId, ns, state, updatedAt = Date.now()) {
+  const key = normalizeNS(ns);
   const json = JSON.stringify(state ?? {});
-  stmtPutState.run(userId, String(ns), json, Number(updatedAt) || Date.now());
+  stmtPutState.run(userId, key, json, Number(updatedAt) || Date.now());
   return true;
 }
 
 /**
  * List namespaces for a user (most-recent first).
  * @param {number} userId
- * @returns {Array<{ns:string, updated_at:number}>}
+ * @returns {Array<{ns:string, updatedAt:number}>}
  */
 function listUserNamespaces(userId) {
-  return stmtListNamespaces.all(userId)
+  return stmtListNamespaces
+    .all(userId)
     .map(r => ({ ns: r.ns, updatedAt: r.updated_at }));
 }
 
@@ -170,7 +240,8 @@ function listUserNamespaces(userId) {
  * @returns {boolean} deleted
  */
 function deleteUserState(userId, ns) {
-  const info = stmtDeleteState.run(userId, String(ns));
+  const key = normalizeNS(ns);
+  const info = stmtDeleteState.run(userId, key);
   return info.changes > 0;
 }
 
@@ -184,6 +255,9 @@ function withTransaction(fn) {
   return tx();
 }
 
+// ─────────────────────────────────────────────────────────────
+// Exports
+// ─────────────────────────────────────────────────────────────
 module.exports = {
   // raw handle (e.g., for session store)
   db,
@@ -192,6 +266,7 @@ module.exports = {
   createUser,
   getUserByEmail,
   getUserById,
+  updateUserProfile,
 
   // states
   getUserState,
