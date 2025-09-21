@@ -1292,9 +1292,12 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         const id = String(req.params.id || '');
         if (!id) return res.status(400).json({ ok: false, error: 'bad-id' });
 
-        // 후보 ns: 요청 ns, 내 uid, 내 email
-        const candidates = getMyNamespaces(req, preferNs); // 이미 선언되어 있음
-        let meta = null, foundNs = null;
+        // ✨ 후보 ns: 요청 ns, 내 uid, 내 email 모두
+        const candidates = getMyNamespaces(req, preferNs); // 이미 파일에 선언된 헬퍼
+
+        // 1) 메타 찾기 (_index.json)
+        let meta = null;
+        let foundNs = null;
         for (const ns of candidates) {
           if (!ns) continue;
           try {
@@ -1304,44 +1307,53 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
               const hit = idx.find(m => String(m.id) === id);
               if (hit) { meta = hit; foundNs = ns; break; }
             }
-          } catch {}
+          } catch {} // 없을 수 있음
         }
-        const ns = foundNs || preferNs; // 응답에도 반영
 
-        // 파일 존재로 ext/mime 보강
-        let ext = meta?.ext || null;
-        let mime = meta?.mime || null;
-        const extsToTry = [];
-        if (ext) extsToTry.push(String(ext).toLowerCase());
-        extsToTry.push('png','jpg','jpeg','webp','gif');
+        // 2) 파일 확장자/타입 찾기 (메타 없거나 ext 없을 때도 안전)
+        const EXT_TO_MIME = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp', gif:'image/gif' };
+        const tryExts = [];
+        if (meta?.ext) tryExts.push(String(meta.ext).toLowerCase());
+        tryExts.push('png','jpg','jpeg','webp','gif');
 
-        const base = path.join(dir, id);
-        for (const e of [...new Set(extsToTry)]) {
-          const p = `${base}.${e}`;
-          if (fs.existsSync(p)) {
-            ext = e;
-            mime =
-              e === 'jpg' || e === 'jpeg' ? 'image/jpeg' :
-              e === 'webp' ? 'image/webp' :
-              e === 'gif'  ? 'image/gif'  : 'image/png';
-            break;
+        let fileExt = null, fileMime = null, fileNs = foundNs;
+        // 먼저 foundNs에서 시도
+        if (fileNs) {
+          const base = path.join(UPLOAD_ROOT, fileNs, id);
+          for (const e of [...new Set(tryExts)]) {
+            if (fs.existsSync(`${base}.${e}`)) { fileExt = e; fileMime = EXT_TO_MIME[e]; break; }
+          }
+        }
+        // 거기서 못 찾으면 후보 ns 전부 스캔
+        if (!fileExt) {
+          for (const ns of candidates) {
+            if (!ns) continue;
+            const base = path.join(UPLOAD_ROOT, ns, id);
+            for (const e of ['png','jpg','jpeg','webp','gif']) {
+              if (fs.existsSync(`${base}.${e}`)) { fileExt = e; fileMime = EXT_TO_MIME[e]; fileNs = ns; break; }
+            }
+            if (fileExt) break;
           }
         }
 
+        // 3) 기본 필드 조립 (meta가 없어도 안전)
         const created_at = Number(meta?.createdAt ?? meta?.created_at ?? 0) || null;
         const out = {
-          id, ns,
+          id,
+          ns: fileNs || foundNs || preferNs,
           label: meta?.label || '',
           created_at, createdAt: created_at,
           width: Number(meta?.width || 0), height: Number(meta?.height || 0),
           caption: typeof meta?.caption === 'string' ? meta.caption : (typeof meta?.text === 'string' ? meta.text : ''),
           text:    typeof meta?.caption === 'string' ? meta.caption : (typeof meta?.text === 'string' ? meta.text : ''),
-          bg:     meta?.bg || meta?.bg_color || meta?.bgHex || null,
+          bg:       meta?.bg || meta?.bg_color || meta?.bgHex || null,
           bg_color: meta?.bg || meta?.bg_color || meta?.bgHex || null,
           bgHex:    meta?.bg || meta?.bg_color || meta?.bgHex || null,
-          ext: ext || null, mime: mime || null,
+          ext: fileExt || meta?.ext || null,
+          mime: fileMime || meta?.mime || (fileExt ? EXT_TO_MIME[fileExt] : null),
         };
 
+        // 4) 좋아요/댓글 카운트 (에러 무시)
         try {
           const uid = req.session?.uid || '';
           const likeCnt = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id)?.n || 0;
@@ -1350,30 +1362,41 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           out.likes = likeCnt; out.comments = cmtCnt; out.liked = liked;
         } catch {}
 
-        // owner info + mine flag 이후 보강
+        // 5) owner 정보 + mine 플래그 (+ meta.author 보강)
         try {
+          const nsUsed = out.ns || preferNs;
           const myns = String(req.session?.uid || '').toLowerCase();
-          const ownerId  = Number(ns);
+          const ownerId  = Number(nsUsed);
           const ownerRow = Number.isFinite(ownerId) ? getUserById(ownerId) : null;
           out.user = ownerRow
             ? publicUserShape(req.session?.uid, ownerRow)
-            : { id: ns, displayName: null, avatarUrl: null };
+            : { id: nsUsed, displayName: null, avatarUrl: null };
 
-          // ✨ 작성자명이 없으면 저장된 author 메타로 보강
+          // 작성자명이 비어있으면 업로드 당시 meta.author로 보강
           if ((!out.user.displayName || out.user.displayName === null) && meta?.author?.displayName) {
             out.user.displayName = meta.author.displayName;
           }
-          // 아바타도 없으면 보강
           if ((!out.user.avatarUrl || out.user.avatarUrl === null) && meta?.author?.avatarUrl) {
             out.user.avatarUrl = meta.author.avatarUrl;
           }
+          out.mine = !!(nsUsed && String(nsUsed).toLowerCase() === myns);
 
-          out.mine = !!(ns && ns.toLowerCase() === myns);
+          // 디버깅/표시용 원본 author도 같이 노출(선택)
+          if (meta?.author) {
+            out.author = {
+              id: meta.author.id ?? null,
+              displayName: meta.author.displayName ?? null,
+              avatarUrl: meta.author.avatarUrl ?? null,
+              email: meta.author.email ?? null,
+            };
+          }
         } catch {}
 
         res.set('Cache-Control', 'no-store');
         return res.json({ ok: true, ...out, item: out });
       } catch (e) {
+        // 원인 확인 쉬우라고 에러 메시지 로그
+        console.log('[GET /api/items/:id] fatal:', e?.stack || e);
         return res.status(500).json({ ok: false, error: 'item-read-failed' });
       }
     });
