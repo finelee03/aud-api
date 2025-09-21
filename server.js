@@ -952,7 +952,7 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
                     : (typeof m?.text === 'string' ? m.text : ''),
               bg: m?.bg || m?.bg_color || m?.bgHex || null,
               // ⬅ 추가: 업로드 당시 저장해둔 작성자 메타를 리스트에도 싣기
-              authorProfile: (m?.author ? {
+              author: (m?.author ? {
                 id: m.author.id ?? null,
                 displayName: m.author.displayName ?? null,
                 avatarUrl: m.author.avatarUrl ?? null,
@@ -1014,11 +1014,11 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           it.user = authorMap.get(key) || { id: it.ns, displayName: null, avatarUrl: null };
           it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
           // ⬅ 추가: user가 비어있으면 업로드 당시 author 메타로 보강
-          if ((!it.user.displayName || it.user.displayName === null) && it.authorProfile?.displayName) {
-            it.user.displayName = it.authorProfile.displayName;
+          if ((!it.user.displayName || it.user.displayName === null) && it.author?.displayName) {
+            it.user.displayName = it.author.displayName;
           }
-          if ((!it.user.avatarUrl || it.user.avatarUrl === null) && it.authorProfile?.avatarUrl) {
-            it.user.avatarUrl = it.authorProfile.avatarUrl;
+          if ((!it.user.avatarUrl || it.user.avatarUrl === null) && it.author?.avatarUrl) {
+            it.user.avatarUrl = it.author.avatarUrl;
           }
         }
 
@@ -1393,6 +1393,16 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           if ((!out.user.avatarUrl || out.user.avatarUrl === null) && meta?.author?.avatarUrl) {
             out.user.avatarUrl = meta.author.avatarUrl;
           }
+         // ⬅ 추가: 레거시(메타에 author가 전혀 없는) 아이템을 위해
+         // 오너 DB 프로필 값으로 최종 보강
+         if (!out.user.displayName && ownerRow?.display_name) {
+           out.user.displayName = ownerRow.display_name;
+         }
+         if (!out.user.avatarUrl) {
+           const fallbackAvatar = latestAvatarUrl?.(ownerRow?.id);
+           if (fallbackAvatar) out.user.avatarUrl = fallbackAvatar;
+         }
+
           out.mine = !!(nsUsed && String(nsUsed).toLowerCase() === myns);
 
           // 디버깅/표시용 원본 author도 같이 노출(선택)
