@@ -345,16 +345,21 @@ function getDisplayNameById(uid) {
 
 function publicUserShape(viewerUid, userRow) {
   if (!userRow) return null;
-  const self = String(userRow.id) === String(viewerUid);
-  const email = String(userRow.email || "");
+  const self   = String(userRow.id) === String(viewerUid);
+  const email  = String(userRow.email || "");
   const masked = self ? email : (email ? email.replace(/^(.).+(@.*)$/, "$1***$2") : null);
+
+  // 1차: DB display_name → 2차: 이메일 local-part
+  const dn = getDisplayNameById(userRow.id) || (email ? email.split("@")[0] : null);
+
   return {
     id: userRow.id,
-    displayName: getDisplayNameById(userRow.id),
+    displayName: dn,
     avatarUrl: latestAvatarUrl(userRow.id),
-    email: masked,              // 본인만 풀 이메일, 타인에게는 마스킹
+    email: masked,
   };
 }
+
 // 현재 비밀번호 해시 읽기/쓰기
 function getUserPwHash(uid) {
   try {
