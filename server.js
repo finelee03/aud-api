@@ -111,6 +111,7 @@ const UPLOAD_ROOT = path.join(__dirname, "public", "uploads");
 process.env.UPLOAD_ROOT = process.env.UPLOAD_ROOT || UPLOAD_ROOT;
 // 파일시스템 기반 퍼블릭 피드 폴백 라우트를 항상 장착
 process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
+process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 function ensureDir(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
 
@@ -1299,7 +1300,7 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
   // =========================================================
   // 단일 아이템 메타 조회
   // =========================================================
-  if (!hasRouteDeep('get', '/items/:id')) {
+  if (process.env.FORCE_FALLBACK_ITEMS === '1' || !hasRouteDeep('get', '/items/:id')) {
     app.get('/api/items/:id', requireLogin, (req, res) => {
       try {
         const preferNs = getNS(req);
