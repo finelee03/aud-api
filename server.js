@@ -59,7 +59,7 @@ const io = new Server(server, {
         if (!origin) return cb(null, true);
         if (!ALLOWED_ORIGINS.length) return cb(null, true);
         const o = String(origin || "").replace(/\/$/, "").toLowerCase();
-        cb(null, !ALLOWED_ORIGINS.length || ALLOWED_ORIGINS.includes(o));
+        cb(null, ALLOWED_ORIGINS.includes(o));
       },
       credentials: true,
       methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
@@ -176,7 +176,7 @@ app.use(
       useDefaults: true,
       directives: {
         "default-src": ["'self'"],
-        "script-src": ["'self'"],
+        "script-src": ["'self'", ...ALLOWED_ORIGINS],
         "style-src": ["'self'", "https://fonts.googleapis.com"],
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
@@ -451,6 +451,7 @@ app.get("/auth/ping", (req, res) => {
 
 
 app.get("/auth/csrf", csrfProtection, (req, res) => {
+  sendNoStore(res);
   return res.json({ csrfToken: req.csrfToken() });
 });
 
@@ -1018,7 +1019,8 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         for (const it of slice) {
           const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
           it.user = authorMap.get(key) || { id: it.ns, displayName: null, avatarUrl: null };
-          it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
+          const myUid = Number(req.session?.uid || 0);
+          it.mine = (Number(it.owner_id) === myUid) || (Number.isFinite(Number(it.ns)) && Number(it.ns) === myUid);
           // ⬅ 추가: user가 비어있으면 업로드 당시 author 메타로 보강
           if ((!it.user.displayName || it.user.displayName === null) && it.author?.displayName) {
             it.user.displayName = it.author.displayName;
@@ -1511,6 +1513,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
         width: Number(width) || 0,
         height: Number(height) || 0,
         ns, ext, mime,
+        owner_id: req.session.uid,
       };
 
       // ✨ 작성자 메타 흡수
