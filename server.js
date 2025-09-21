@@ -716,6 +716,13 @@ app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
   putUserState(req.session.uid, ns, state, updatedAt);
   return res.json({ ok: true });
 });
+app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
+  const ns = String(req.body.ns || req.session.uid).toLowerCase();
+  const state = req.body.state || req.body; // store.js 폴백과 호환
+  const updatedAt = Number(state?.updatedAt || Date.now());
+  putUserState(req.session.uid, ns, state, updatedAt);
+  return res.json({ ok: true });
+});
 
 // ──────────────────────────────────────────────────────────
 // 소셜/피드 라우터(있으면 자동 장착) — 업로드/블랍보다 '위'
@@ -1476,7 +1483,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
       idx = idx.slice(0, 2000);                    // 안전한 상한
       writeJsonAtomic(indexPath, idx);
 
-      return res.json({ ok: true, id, ext, mime });
+      return res.json({ ok: true, id, ns, ext, mime });
     } catch (e) {
       return res.status(500).json({ ok: false, error: "upload-failed" });
     }
