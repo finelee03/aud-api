@@ -1288,18 +1288,25 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
   if (!hasRouteDeep('get', '/items/:id')) {
     app.get('/api/items/:id', requireLogin, (req, res) => {
       try {
-        const ns = getNS(req);
+        const preferNs = getNS(req);
         const id = String(req.params.id || '');
         if (!id) return res.status(400).json({ ok: false, error: 'bad-id' });
 
-        const dir = path.join(UPLOAD_ROOT, ns);
-        const indexPath = path.join(dir, '_index.json');
-
-        let meta = null;
-        try {
-          const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
-          if (Array.isArray(idx)) meta = idx.find(m => String(m.id) === id) || null;
-        } catch {}
+        // 후보 ns: 요청 ns, 내 uid, 내 email
+        const candidates = getMyNamespaces(req, preferNs); // 이미 선언되어 있음
+        let meta = null, foundNs = null;
+        for (const ns of candidates) {
+          if (!ns) continue;
+          try {
+            const indexPath = path.join(UPLOAD_ROOT, ns, '_index.json');
+            const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            if (Array.isArray(idx)) {
+              const hit = idx.find(m => String(m.id) === id);
+              if (hit) { meta = hit; foundNs = ns; break; }
+            }
+          } catch {}
+        }
+        const ns = foundNs || preferNs; // 응답에도 반영
 
         // 파일 존재로 ext/mime 보강
         let ext = meta?.ext || null;
@@ -1397,7 +1404,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
   upload.single("file"),
   (req, res) => {
     try {
-      const ns = getNS(req);
+      const ns = String(req.session.uid).toLowerCase();
       const {
         id = `g_${Date.now()}`,
         label = "",
