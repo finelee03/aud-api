@@ -1399,15 +1399,27 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           if ((!out.user.avatarUrl || out.user.avatarUrl === null) && meta?.author?.avatarUrl) {
             out.user.avatarUrl = meta.author.avatarUrl;
           }
-         // ⬅ 추가: 레거시(메타에 author가 전혀 없는) 아이템을 위해
-         // 오너 DB 프로필 값으로 최종 보강
-         if (!out.user.displayName && ownerRow?.display_name) {
-           out.user.displayName = ownerRow.display_name;
-         }
-         if (!out.user.avatarUrl) {
-           const fallbackAvatar = latestAvatarUrl?.(ownerRow?.id);
-           if (fallbackAvatar) out.user.avatarUrl = fallbackAvatar;
-         }
+
+          // 레거시(메타에 author가 전혀 없는) 아이템을 위해 오너 DB 값 재보강
+          if (!out.user.displayName && ownerRow?.display_name) {
+            out.user.displayName = ownerRow.display_name;
+          }
+
+          // ★ 최종 폴백: 이메일 local-part(예: finelee03)
+          if (!out.user.displayName && ownerRow?.email) {
+            out.user.displayName = String(ownerRow.email).split("@")[0];
+          }
+
+          // author 필드 자체도 없으면 최소 셋업(디버깅/FE 호환)
+          if (!out.author && ownerRow) {
+            out.author = {
+              id: ownerRow.id ?? null,
+              displayName: out.user.displayName ?? (ownerRow.email ? String(ownerRow.email).split("@")[0] : null),
+              avatarUrl: out.user.avatarUrl ?? latestAvatarUrl?.(ownerRow.id) ?? null,
+              email: ownerRow.email ?? null,
+            };
+          }
+
 
           out.mine = !!(nsUsed && String(nsUsed).toLowerCase() === myns);
 
@@ -1420,6 +1432,13 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
               email: meta.author.email ?? null,
             };
           }
+          // ★ 최종 백필: author가 없거나(author.displayName이 비었으면) user로 보강
+          if (!out.author) out.author = {};
+          if (!out.author.id && out.user?.id) out.author.id = out.user.id;
+          if (!out.author.displayName && out.user?.displayName) out.author.displayName = out.user.displayName;
+          if (!out.author.avatarUrl && out.user?.avatarUrl) out.author.avatarUrl = out.user.avatarUrl;
+          if (!out.author.email && out.user?.email) out.author.email = out.user.email;
+
         } catch {}
 
         res.set('Cache-Control', 'no-store');
