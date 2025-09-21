@@ -942,10 +942,6 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           for (const m of idx) {
             const id = String(m?.id || '').trim();
             if (!id) continue;
-
-            // ✅ 업로드 당시 기록된 작성자 메타(author) 안전추출
-            const a = (m && m.author) || (m && m.meta && m.meta.author) || null;
-
             all.push({
               id, ns,
               label: String(m?.label || ''),
@@ -955,18 +951,13 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
               caption: typeof m?.caption === 'string' ? m.caption
                     : (typeof m?.text === 'string' ? m.text : ''),
               bg: m?.bg || m?.bg_color || m?.bgHex || null,
-
-              // ✅ 작성자 메타를 그대로 싣는다(목록 보강용)
-              author: a ? {
-                id:        a.id ?? null,
-                displayName: a.displayName ?? null,
-                avatarUrl: a.avatarUrl ?? null,
-                email:     a.email ?? null,
-              } : null,
-
-              // (선택) ext/mime도 있으면 싣기
-              ext:  m?.ext  || null,
-              mime: m?.mime || (m?.ext ? EXT_MIME[String(m.ext).toLowerCase()] : null),
+              // ⬅ 추가: 업로드 당시 저장해둔 작성자 메타를 리스트에도 싣기
+              authorProfile: (m?.author ? {
+                id: m.author.id ?? null,
+                displayName: m.author.displayName ?? null,
+                avatarUrl: m.author.avatarUrl ?? null,
+                email: m.author.email ?? null,
+              } : null),
             });
           }
         }
@@ -1017,21 +1008,19 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
             authorMap.set(key, row ? publicUserShape(req.session?.uid, row) : null);
           }
         }
-        
+
         for (const it of slice) {
           const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
           it.user = authorMap.get(key) || { id: it.ns, displayName: null, avatarUrl: null };
           it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
-
-          // ✅ 목록 단계에서도 작성자명/아바타 보강 (단건 조회 로직과 동일한 규칙)
-          if ((!it.user.displayName || it.user.displayName === null) && it.author?.displayName) {
-            it.user.displayName = it.author.displayName;
+          // ⬅ 추가: user가 비어있으면 업로드 당시 author 메타로 보강
+          if ((!it.user.displayName || it.user.displayName === null) && it.authorProfile?.displayName) {
+            it.user.displayName = it.authorProfile.displayName;
           }
-          if ((!it.user.avatarUrl || it.user.avatarUrl === null) && it.author?.avatarUrl) {
-            it.user.avatarUrl = it.author.avatarUrl;
+          if ((!it.user.avatarUrl || it.user.avatarUrl === null) && it.authorProfile?.avatarUrl) {
+            it.user.avatarUrl = it.authorProfile.avatarUrl;
           }
         }
-
 
         const next = (all.length > limit && slice.length)
           ? `${slice[slice.length - 1].created_at}-${slice[slice.length - 1].id}` : null;
