@@ -831,8 +831,8 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
   }
   function emitVoteUpdate(itemId, ns){
     const counts = voteCountsOf(itemId);
-    io.to(`item:${itemId}`).emit('vote:update', { id: itemId, ns, counts, ts: Date.now() });
-    io.emit('vote:update', { id: itemId, ns, counts, ts: Date.now() });
+    io.to(`item:${itemId}`).emit('vote:update', { id: itemId, ns, counts, ts: Date.now(), owner: { ns } });
+    io.emit('vote:update', { id: itemId, ns, counts, ts: Date.now(), owner: { ns } });
     return counts;
   }
 
@@ -848,8 +848,8 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         db.prepare('INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)')
           .run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
-        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
-        io.emit('item:like',         { id, ns, likes: n, liked: true, by: uid, ts: Date.now() });
+        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: true, by: uid, ts: Date.now(), owner: { ns } });
+        io.emit('item:like',         { id, ns, likes: n, liked: true, by: uid, ts: Date.now(), owner: { ns } });
         res.json({ ok: true, liked: true, likes: n });
       } catch { res.status(500).json({ ok: false }); }
     });
