@@ -1017,13 +1017,7 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
             authorMap.set(key, row ? publicUserShape(req.session?.uid, row) : null);
           }
         }
-
-        for (const it of slice) {
-          const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
-          it.user = authorMap.get(key) || { id: it.ns, displayName: null, avatarUrl: null };
-          it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
-        }
-
+        
         for (const it of slice) {
           const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
           it.user = authorMap.get(key) || { id: it.ns, displayName: null, avatarUrl: null };
