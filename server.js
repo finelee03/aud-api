@@ -1336,7 +1336,7 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           out.likes = likeCnt; out.comments = cmtCnt; out.liked = liked;
         } catch {}
 
-        // owner info + mine flag
+        // owner info + mine flag 이후 보강
         try {
           const myns = String(req.session?.uid || '').toLowerCase();
           const ownerId  = Number(ns);
@@ -1344,8 +1344,19 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
           out.user = ownerRow
             ? publicUserShape(req.session?.uid, ownerRow)
             : { id: ns, displayName: null, avatarUrl: null };
+
+          // ✨ 작성자명이 없으면 저장된 author 메타로 보강
+          if ((!out.user.displayName || out.user.displayName === null) && meta?.author?.displayName) {
+            out.user.displayName = meta.author.displayName;
+          }
+          // 아바타도 없으면 보강
+          if ((!out.user.avatarUrl || out.user.avatarUrl === null) && meta?.author?.avatarUrl) {
+            out.user.avatarUrl = meta.author.avatarUrl;
+          }
+
           out.mine = !!(ns && ns.toLowerCase() === myns);
         } catch {}
+
         res.set('Cache-Control', 'no-store');
         return res.json({ ok: true, ...out, item: out });
       } catch (e) {
@@ -1409,15 +1420,32 @@ app.post(["/api/gallery/upload", "/api/gallery"],
 
       // 2) 메타 저장(확장자/타입 포함)
       const meta = {
-        id,
-        label,
+        id, label,
         createdAt: Number(createdAt) || Date.now(),
         width: Number(width) || 0,
         height: Number(height) || 0,
-        ns,
-        ext,
-        mime,
+        ns, ext, mime,
       };
+
+      // ✨ 작성자 메타 흡수
+      {
+        const b = req.body || {};
+        // labelmine이 보내는 author_* 혹은 user 객체에서 안전하게 수집
+        const fromUser = (() => {
+          try { return typeof b.user === 'string' ? JSON.parse(b.user) : (b.user || null); } catch { return null; }
+        })();
+        const author = {
+          id:          b.author_id || fromUser?.id || null,
+          displayName: b.author_name || fromUser?.displayName || fromUser?.name || null,
+          handle:      b.author_handle || null,
+          avatarUrl:   b.author_avatar || fromUser?.avatarUrl || null,
+          email:       fromUser?.email || null,  // 마스킹은 조회 시 처리
+        };
+        // 값이 하나라도 있으면 meta에 기록
+        if (author.id || author.displayName || author.avatarUrl || author.email) {
+          meta.author = author;
+        }
+      }
 
             // 2025-09-09: caption/bg 저장 (labelmine에서 보낸 값 반영)
       {
