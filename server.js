@@ -343,7 +343,7 @@ function getDisplayNameById(uid) {
   } catch { return null; }
 }
 
-function publicUserShape(viewerUid, userRow, req) {
+function publicUserShape(viewerUid, userRow) {
   if (!userRow) return null;
   const self   = String(userRow.id) === String(viewerUid);
   const email  = String(userRow.email || "");
@@ -355,7 +355,7 @@ function publicUserShape(viewerUid, userRow, req) {
   return {
     id: userRow.id,
     displayName: dn,
-    avatarUrl: absUrl(req, latestAvatarUrl(userRow.id)),
+    avatarUrl: latestAvatarUrl(userRow.id),
     email: masked,
   };
 }
@@ -433,14 +433,6 @@ const EmailPw = z.object({
   email: z.string().email().max(200),
   password: z.string().min(8).max(200),
 });
-
-// 절대 URL 변환 (이미 절대면 그대로 반환)
-function absUrl(req, p) {
-  if (!p) return null;
-  if (/^https?:\/\//i.test(p)) return p;
-  const base = `${req.protocol}://${req.get("host")}`;
-  return `${base}${p.startsWith("/") ? p : `/${p}`}`;
-}
 
 // ──────────────────────────────────────────────────────────
 // 인증 라우트
@@ -559,7 +551,7 @@ app.get("/api/users/:id/public", requireLogin, (req, res) => {
 
     if (!row) return res.status(404).json({ ok:false, error:"not-found" });
 
-    const profile = publicUserShape(req.session.uid, row, req);
+    const profile = publicUserShape(req.session.uid, row);
     return res.json({ ok:true, profile });
   } catch (e) {
     return res.status(500).json({ ok:false, error:"profile-failed" });
@@ -611,23 +603,10 @@ app.post(
     const filename = `${uid}-${Date.now()}.webp`;
     fs.writeFileSync(path.join(AVATAR_DIR, filename), outBuf);
 
-    // 이전 아바타 파일 정리: uid-*.{webp,png,jpg,gif} 중 최신 3개만 유지
-    try {
-      const files = fs.readdirSync(AVATAR_DIR)
-        .filter(f => f.startsWith(`${uid}-`) && /\.(webp|png|jpe?g|gif)$/i.test(f))
-        .sort((a,b) => {
-          const ta = Number((a.split("-")[1] || "").split(".")[0]) || 0;
-          const tb = Number((b.split("-")[1] || "").split(".")[0]) || 0;
-          return tb - ta;
-        });
-      for (const f of files.slice(3)) { try { fs.unlinkSync(path.join(AVATAR_DIR, f)); } catch {} }
-    } catch {}
-
-    const rel = `/uploads/avatars/${filename}`;
-    const url = absUrl(req, rel);
-    _avatarCache.set(String(uid), { url: rel, t: Date.now() });
+    const avatarUrl = `/uploads/avatars/${filename}`;
+    _avatarCache.set(String(uid), { url: avatarUrl, t: Date.now() });
     res.set("Cache-Control", "no-store");
-    res.json({ ok:true, avatarUrl: url });
+    res.json({ ok:true, avatarUrl });
   }
 );
 
@@ -704,7 +683,7 @@ function meHandler(req, res) {
     }
   } catch {}
 
-  const avatarUrl = absUrl(req, latestAvatarUrl(req.session.uid));
+  const avatarUrl = latestAvatarUrl(req.session.uid);
 
   // ★ user 안과 top-level 둘 다 넣어 FE 호환 보장
   const payload = {
