@@ -67,6 +67,8 @@ const io = new Server(server, {
   })
 });
 
+const ITEM_OWNER_NS = new Map();
+
 const PORT = process.env.PORT || 8787;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const PROD = process.env.NODE_ENV === "production";
@@ -735,7 +737,6 @@ app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
 // ──────────────────────────────────────────────────────────
 mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
-mountIfExists("./routes/comments.routes");  // 댓글 CRUD
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
 
@@ -778,14 +779,6 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
     return false;
   }
 
-
-  function _itemIdOfComment(cid) {
-    try {
-      const r = db.prepare('SELECT item_id FROM item_comments WHERE id=?').get(cid);
-      return r?.item_id || null;
-    } catch { return null; }
-  }
-
   // ───────────────── 테이블 보장 ─────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS item_likes (
@@ -793,19 +786,6 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
       user_id   TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       PRIMARY KEY (item_id, user_id)
-    );
-    CREATE TABLE IF NOT EXISTS item_comments (
-      id         TEXT PRIMARY KEY,
-      item_id    TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      text       TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS comment_likes (
-      comment_id TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      PRIMARY KEY (comment_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS idx_comment_likes_comment ON comment_likes(comment_id);
 
@@ -844,8 +824,11 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
   }
   function emitVoteUpdate(itemId, ns){
     const counts = voteCountsOf(itemId);
-    io.to(`item:${itemId}`).emit('vote:update', { id: itemId, ns, counts, ts: Date.now(), owner: { ns } });
-    io.emit('vote:update', { id: itemId, ns, counts, ts: Date.now(), owner: { ns } });
+    const ownerNs = ITEM_OWNER_NS.get(String(itemId)) || null;
+    const payload = { id: itemId, ns, counts, ts: Date.now() };
+    if (ownerNs) payload.owner = { ns: ownerNs };
+    io.to(`item:${itemId}`).emit('vote:update', payload);
+    io.emit('vote:update', payload);
     return counts;
   }
 
@@ -861,8 +844,13 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         db.prepare('INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)')
           .run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
-        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: true, by: uid, ts: Date.now(), owner: { ns } });
-        io.emit('item:like',         { id, ns, likes: n, liked: true, by: uid, ts: Date.now(), owner: { ns } });
+        {
+          const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+          const payload = { id, ns, likes: n, liked: true, by: uid, ts: Date.now() };
+          if (ownerNs) payload.owner = { ns: ownerNs };
+          io.to(`item:${id}`).emit('item:like', payload);
+          io.emit('item:like', payload);
+        }
         res.json({ ok: true, liked: true, likes: n });
       } catch { res.status(500).json({ ok: false }); }
     });
@@ -875,8 +863,13 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         const ns  = getNS(req);
         db.prepare('DELETE FROM item_likes WHERE item_id=? AND user_id=?').run(id, uid);
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
-        io.to(`item:${id}`).emit('item:like', { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
-        io.emit('item:like',         { id, ns, likes: n, liked: false, by: uid, ts: Date.now() });
+        {
+          const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+          const payload = { id, ns, likes: n, liked: false, by: uid, ts: Date.now() };
+          if (ownerNs) payload.owner = { ns: ownerNs };
+          io.to(`item:${id}`).emit('item:like', payload);
+          io.emit('item:like', payload);
+        }
         res.json({ ok: true, liked: false, likes: n });
       } catch { res.status(500).json({ ok: false }); }
     });
@@ -988,11 +981,10 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
 
         // 5) DB 카운트/liked 보강
         const uid = req.session?.uid || '';
-        let likeCnt, likedMe, cmtCnt;
+        let likeCnt, likedMe;
         try {
           likeCnt = db.prepare('SELECT COUNT(*) n FROM item_likes   WHERE item_id=?');
           likedMe = db.prepare('SELECT 1         FROM item_likes   WHERE item_id=? AND user_id=?');
-          cmtCnt  = db.prepare('SELECT COUNT(*) n FROM item_comments WHERE item_id=?');
         } catch {}
 
         const authors = new Set();
@@ -1036,137 +1028,6 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         console.log('[gallery.public] fatal:', e?.stack || e);
         return res.status(500).json({ ok:false, error:'public-feed-failed' });
       }
-    });
-  }
-
-  // =========================================================
-  // 댓글 좋아요
-  // =========================================================
-  if (!hasRouteDeep('put', '/comments/:id/like')) {
-    app.put('/api/comments/:id/like', requireLogin, csrfProtection, (req, res) => {
-      const cid = String(req.params.id);
-      const uid = req.session.uid;
-      const ns  = getNS(req);
-      try {
-        db.prepare('INSERT OR IGNORE INTO comment_likes(comment_id, user_id, created_at) VALUES(?,?,?)')
-          .run(cid, uid, Date.now());
-        const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
-        const itemId = _itemIdOfComment(cid);
-        if (itemId) {
-          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
-          io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
-        }
-        res.json({ ok:true, liked:true, likes:n });
-      } catch { res.status(500).json({ ok:false }); }
-    });
-  }
-  if (!hasRouteDeep('delete', '/comments/:id/like')) {
-    app.delete('/api/comments/:id/like', requireLogin, csrfProtection, (req, res) => {
-      const cid = String(req.params.id);
-      const uid = req.session.uid;
-      const ns  = getNS(req);
-      try {
-        db.prepare('DELETE FROM comment_likes WHERE comment_id=? AND user_id=?').run(cid, uid);
-        const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
-        const itemId = _itemIdOfComment(cid);
-        if (itemId) {
-          io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
-          io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
-        }
-        res.json({ ok:true, liked:false, likes:n });
-      } catch { res.status(500).json({ ok:false }); }
-    });
-  }
-
-  // FE 폴백 경로
-  if (!hasRouteDeep('put', '/items/:id/comments/:cid/like')) {
-    app.put('/api/items/:id/comments/:cid/like', requireLogin, csrfProtection, (req, res) => {
-      const itemId = String(req.params.id);
-      const cid    = String(req.params.cid);
-      const uid    = req.session.uid;
-      const ns     = getNS(req);
-      try {
-        const owner = _itemIdOfComment(cid);
-        if (!owner || owner !== itemId) return res.status(404).json({ ok:false, error:'comment-not-found' });
-
-        db.prepare('INSERT OR IGNORE INTO comment_likes(comment_id, user_id, created_at) VALUES(?,?,?)')
-          .run(cid, uid, Date.now());
-        const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
-
-        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
-        io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:true,  by:uid, ts:Date.now() });
-        res.json({ ok:true, liked:true, likes:n });
-      } catch { res.status(500).json({ ok:false }); }
-    });
-  }
-  if (!hasRouteDeep('delete', '/items/:id/comments/:cid/like')) {
-    app.delete('/api/items/:id/comments/:cid/like', requireLogin, csrfProtection, (req, res) => {
-      const itemId = String(req.params.id);
-      const cid    = String(req.params.cid);
-      const uid    = req.session.uid;
-      const ns     = getNS(req);
-      try {
-        const owner = _itemIdOfComment(cid);
-        if (!owner || owner !== itemId) return res.status(404).json({ ok:false, error:'comment-not-found' });
-
-        db.prepare('DELETE FROM comment_likes WHERE comment_id=? AND user_id=?').run(cid, uid);
-        const n = db.prepare('SELECT COUNT(*) n FROM comment_likes WHERE comment_id=?').get(cid).n;
-
-        io.to(`item:${itemId}`).emit('comment:like', { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
-        io.emit('comment:like',                   { id:itemId, cid, ns, likes:n, liked:false, by:uid, ts:Date.now() });
-        res.json({ ok:true, liked:false, likes:n });
-      } catch { res.status(500).json({ ok:false }); }
-    });
-  }
-
-  // 댓글 리스트/작성
-  if (!hasRouteDeep('get', '/items/:id/comments')) {
-    app.get('/api/items/:id/comments', requireLogin, (req, res) => {
-      const id = String(req.params.id);
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
-      const uid = req.session?.uid || '';
-      const rows = db.prepare(`
-        SELECT c.id, c.user_id, c.text, c.created_at,
-              (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id=c.id) AS likes,
-              EXISTS(SELECT 1 FROM comment_likes cl WHERE cl.comment_id=c.id AND cl.user_id=?) AS liked
-          FROM item_comments c
-        WHERE c.item_id=?
-        ORDER BY c.created_at ASC
-        LIMIT ?
-      `).all(uid, id, limit);
-
-      const authorIds = [...new Set(rows.map(r => String(r.user_id)))];
-      const authorMap = new Map();
-      for (const uid of authorIds) {
-        const row = getUserById(Number(uid));
-        authorMap.set(String(uid), row ? publicUserShape(req.session?.uid, row) : null);
-      }
-
-      res.json({
-        ok: true,
-        items: rows.map(r => ({
-          id: r.id,
-          author: r.user_id,
-          text: r.text,
-          created_at: r.created_at,
-          likes: Number(r.likes) || 0,
-          liked: !!r.liked,
-          authorProfile: authorMap.get(String(r.user_id)) // {id, displayName, avatarUrl, email?}
-        }))
-      });
-    });
-  }
-  if (!hasRouteDeep('post', '/items/:id/comments')) {
-    app.post('/api/items/:id/comments', requireLogin, csrfProtection, (req, res) => {
-      const id = String(req.params.id);
-      const uid = req.session.uid;
-      const text = String(req.body?.text || '').slice(0, 300).trim();
-      if (!text) return res.status(400).json({ ok: false, error: 'empty' });
-      const cid = `c_${Date.now()}`;
-      db.prepare('INSERT INTO item_comments(id, item_id, user_id, text, created_at) VALUES(?,?,?,?,?)')
-        .run(cid, id, uid, text, Date.now());
-      const n = db.prepare('SELECT COUNT(*) n FROM item_comments WHERE item_id=?').get(id).n;
-      res.json({ ok: true, id: cid, comments: n });
     });
   }
 
@@ -1377,9 +1238,8 @@ mountIfExists("./routes/comments.routes");  // 댓글 CRUD
         try {
           const uid = req.session?.uid || '';
           const likeCnt = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id)?.n || 0;
-          const cmtCnt  = db.prepare('SELECT COUNT(*) n FROM item_comments WHERE item_id=?').get(id)?.n || 0;
           const liked   = !!db.prepare('SELECT 1 FROM item_likes WHERE item_id=? AND user_id=?').get(id, uid);
-          out.likes = likeCnt; out.comments = cmtCnt; out.liked = liked;
+          out.likes = likeCnt; out.liked = liked;
         } catch {}
 
         // 5) owner 정보 + mine 플래그 (+ meta.author 보강)
@@ -1635,11 +1495,6 @@ function removeItemEverywhere(req, id) {
 // 삭제 시 DB 고아 레코드 정리
 function purgeItemDb(id) {
   try {
-    // 댓글 id 목록 → 댓글 좋아요 삭제 → 댓글 삭제 → 아이템 좋아요/투표 삭제
-    const comments = db.prepare('SELECT id FROM item_comments WHERE item_id=?').all(id);
-    const delCmtLike = db.prepare('DELETE FROM comment_likes WHERE comment_id=?');
-    for (const c of comments) delCmtLike.run(c.id);
-    db.prepare('DELETE FROM item_comments WHERE item_id=?').run(id);
     db.prepare('DELETE FROM item_likes WHERE item_id=?').run(id);
     db.prepare('DELETE FROM item_votes WHERE item_id=?').run(id);
   } catch {}
@@ -1849,25 +1704,45 @@ app.get("/", (_, res) => res.sendFile(path.join(PUBLIC_DIR, "home.html")));
 // ──────────────────────────────────────────────────────────
 io.engine.use(sessionMiddleware);
 io.on("connection", (sock) => {
-  sock.on("subscribe", (payload) => {
-    const labels = Array.isArray(payload?.labels)
+  sock.on("subscribe", (payload = {}) => {
+    // 1) 라벨 조인(기존 유지)
+    const labels = Array.isArray(payload.labels)
       ? payload.labels
-      : payload?.label ? [payload.label] : [];
-    for (const lb of labels)
-      if (typeof lb === "string" && lb) sock.join(`label:${lb}`);
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    for (const it of items)
-      if (typeof it === "string" && it) sock.join(`item:${it}`);
+      : (payload.label ? [payload.label] : []);
+    for (const lb of labels) if (typeof lb === "string" && lb) sock.join(`label:${lb}`);
+
+    // 2) 내 NS / 감시 NS 조인
+    const ns = String(payload.ns || "").toLowerCase();
+    if (ns) sock.join(`ns:${ns}`);
+    const watch = Array.isArray(payload.watch) ? payload.watch : [];
+    for (const w of watch) {
+      const wn = String(w || "").toLowerCase();
+      if (wn) sock.join(`ns:${wn}`);
+    }
+
+    // 3) 아이템 조인 + ★소유자 NS 학습
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    for (const it of items) {
+      const id = String(it || "");
+      if (!id) continue;
+      sock.join(`item:${id}`);
+      if (ns) ITEM_OWNER_NS.set(id, ns); // 핵심: “이 아이템은 ns 소유”
+    }
   });
-  sock.on("unsubscribe", (payload) => {
-    const labels = Array.isArray(payload?.labels)
+
+  sock.on("unsubscribe", (payload = {}) => {
+    const labels = Array.isArray(payload.labels)
       ? payload.labels
-      : payload?.label ? [payload.label] : [];
-    for (const lb of labels)
-      if (typeof lb === "string" && lb) sock.leave(`label:${lb}`);
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    for (const it of items)
-      if (typeof it === "string" && it) sock.leave(`item:${it}`);
+      : (payload.label ? [payload.label] : []);
+    for (const lb of labels) if (typeof lb === "string" && lb) sock.leave(`label:${lb}`);
+
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    for (const it of items) {
+      const id = String(it || "");
+      if (!id) continue;
+      sock.leave(`item:${id}`);
+      // 캐시는 유지(다른 소켓이 여전히 감시 중일 수 있음)
+    }
   });
 });
 
