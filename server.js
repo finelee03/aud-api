@@ -1833,6 +1833,46 @@ try {
   console.log("[push] table create error:", e?.message || e);
 }
 
+/* [PATCH][ADD-ONLY] push_subscriptions schema migrate */
+(() => {
+  try {
+    const hasTable = !!db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='push_subscriptions'"
+    ).get();
+
+    if (!hasTable) {
+      db.prepare(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint   TEXT PRIMARY KEY,
+        ns         TEXT,
+        uid        TEXT,
+        p256dh     TEXT,
+        auth       TEXT,
+        ua         TEXT,
+        created_at INTEGER
+      )`).run();
+    } else {
+      // 안전하게 누락 컬럼만 추가
+      const cols = db.prepare("PRAGMA table_info(push_subscriptions)").all().map(r => r.name);
+      const add = (name, sql) => { if (!cols.includes(name)) db.prepare(sql).run(); };
+      add("ns",        "ALTER TABLE push_subscriptions ADD COLUMN ns TEXT");
+      add("uid",       "ALTER TABLE push_subscriptions ADD COLUMN uid TEXT");
+      add("p256dh",    "ALTER TABLE push_subscriptions ADD COLUMN p256dh TEXT");
+      add("auth",      "ALTER TABLE push_subscriptions ADD COLUMN auth TEXT");
+      add("ua",        "ALTER TABLE push_subscriptions ADD COLUMN ua TEXT");
+      add("created_at","ALTER TABLE push_subscriptions ADD COLUMN created_at INTEGER");
+    }
+
+    // 인덱스(있으면 무시)
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_ns ON push_subscriptions(ns)").run();
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_uid ON push_subscriptions(uid)").run();
+
+    console.log("[push] table ready");
+  } catch (e) {
+    console.log("[push] migrate error:", e?.message || e);
+  }
+})();
+
+
 // Helpers
 function normNS(s){ return String(s || "").trim().toLowerCase() || "default"; }
 
@@ -1888,7 +1928,7 @@ async function sendPushToNS(ns, payload){
 }
 
 // Routes
-app.post("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
+app.post("/api/push/subscribe", express.json(), (req, res) => {
   const ns  = normNS(getNS(req));
   const sub = req.body?.subscription || null;
   if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
@@ -1896,13 +1936,13 @@ app.post("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
   res.json({ ok, ns });
 });
 
-app.delete("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
+app.delete("/api/push/subscribe", express.json(), (req, res) => {
   const endpoint = req.body?.endpoint || req.query?.endpoint || "";
   const ok = endpoint ? deleteSubscriptionByEndpoint(endpoint) : false;
   res.json({ ok });
 });
 
-app.post("/api/push/test", express.json(), csrfProtection, async (req, res) => {
+app.post("/api/push/test", express.json(), async (req, res) => {
   const ns    = normNS(req.body?.ns || getNS(req));
   const title = String(req.body?.title || "aud");
   const body  = String(req.body?.body  || "새 알림이 도착했습니다.");
