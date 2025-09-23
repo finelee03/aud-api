@@ -787,7 +787,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       created_at INTEGER NOT NULL,
       PRIMARY KEY (item_id, user_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_comment_likes_comment ON comment_likes(comment_id);
 
     /* 신규: 투표 테이블 (FE 스펙: label) */
     CREATE TABLE IF NOT EXISTS item_votes (
@@ -979,13 +978,28 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         }
         const slice = all.slice(0, limit);
 
-        // 5) DB 카운트/liked 보강
+        // 5) DB 카운트/liked 보강 (배치)
         const uid = req.session?.uid || '';
-        let likeCnt, likedMe;
-        try {
-          likeCnt = db.prepare('SELECT COUNT(*) n FROM item_likes   WHERE item_id=?');
-          likedMe = db.prepare('SELECT 1         FROM item_likes   WHERE item_id=? AND user_id=?');
-        } catch {}
+        if (slice.length) {
+          const ids = slice.map(it => String(it.id));
+          const marks = ids.map(() => '?').join(',');
+
+          const likeRows = db.prepare(
+            `SELECT item_id, COUNT(*) n FROM item_likes WHERE item_id IN (${marks}) GROUP BY item_id`
+          ).all(...ids);
+          const likedRows = db.prepare(
+            `SELECT item_id FROM item_likes WHERE user_id=? AND item_id IN (${marks})`
+          ).all(uid, ...ids);
+
+          const likeMap  = new Map(likeRows.map(r => [String(r.item_id), Number(r.n) || 0]));
+          const likedSet = new Set(likedRows.map(r => String(r.item_id)));
+
+          for (const it of slice) {
+            const k = String(it.id);
+            it.likes = likeMap.get(k) || 0;
+            it.liked = likedSet.has(k);
+          }
+        }
 
         const authors = new Set();
         for (const it of slice) {
