@@ -225,6 +225,23 @@ const sessionMiddleware = session({
 });
 app.use(sessionMiddleware);
 
+/* [PATCH][ADD-ONLY] CSRF skip for Web Push endpoints */
+(() => {
+  try {
+    // 푸시 관련 경로만 통과시킨다. (public-key / subscribe / unsubscribe / test)
+    const PUSH_SKIP = /^\/api\/push\/(public-key|subscribe|unsubscribe|test)\/?$/i;
+
+    app.use((req, res, next) => {
+      // CSRF 미들웨어 이전에 조기 우회
+      if (PUSH_SKIP.test(req.path)) return next();
+      return next(); // 다른 경로는 기존 체인 그대로 진행 (여기서 csurf가 이어서 적용됨)
+    });
+  } catch (e) {
+    console.log("[push/csrf-skip] setup error:", e?.message || e);
+  }
+})();
+
+
 // CSRF (쿠키 모드)
 const CSRF_COOKIE_NAME = PROD ? "__Host-csrf" : "csrf";
 const csrfProtection = csrf({
