@@ -857,8 +857,9 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const id  = String(req.params.id);
         const uid = req.session.uid;
         const ns  = getNS(req);
-        db.prepare('INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)')
-          .run(id, uid, Date.now());
+        const info = db.prepare(
+          'INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)'
+        ).run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
         {
           const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
@@ -866,6 +867,10 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (ownerNs) payload.owner = { ns: ownerNs };
           io.to(`item:${id}`).emit('item:like', payload);
           io.emit('item:like', payload);
+          // ★ 신규 삽입(=진짜 새 좋아요)이고, 자기 자신이 아닌 경우에만 푸시
+          if (ownerNs && info && info.changes > 0 && String(uid) !== String(ownerNs)) {
+            try { app.locals.notifyLike?.(ownerNs, id, /*byUserDisplay*/ null); } catch {}
+          }
         }
         res.json({ ok: true, liked: true, likes: n });
       } catch { res.status(500).json({ ok: false }); }
@@ -1074,7 +1079,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const ns  = getNS(req);
         const label = String(req.query.label || req.body?.label || req.body?.choice || '').trim();
         if (!isVoteLabel(label)) return res.status(400).json({ ok:false, error:'bad-label' });
-
+        const prev = db.prepare('SELECT label FROM item_votes WHERE item_id=? AND user_id=?').get(id, uid)?.label || null;
         db.prepare(`
           INSERT INTO item_votes(item_id,user_id,label,created_at)
           VALUES(?,?,?,?)
@@ -1084,6 +1089,11 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
         const counts = emitVoteUpdate(id, ns);
         res.json({ ok:true, id, counts, my: label });
+        // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
+        const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+        if (ownerNs && String(uid) !== String(ownerNs) && prev !== label) {
+          try { app.locals.notifyVote?.(ownerNs, id, label); } catch {}
+        }
       } catch { res.status(500).json({ ok:false }); }
     });
   }
