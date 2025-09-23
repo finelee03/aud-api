@@ -1779,3 +1779,144 @@ server.listen(PORT, () => {
   }
 });
 
+
+/* ======================================================================
+ * Web Push subsystem (append-only)
+ * - Requires env: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT
+ * - Creates table push_subscriptions(ns, endpoint, p256dh, auth, created_at)
+ * - Routes:
+ *      POST   /api/push/subscribe   { ns, subscription }
+ *      DELETE /api/push/subscribe   { endpoint }
+ *      POST   /api/push/test        { ns, title, body, data? }
+ * - Helper: sendPushToNS(ns, payload)
+ * ====================================================================== */
+const webpush = require("web-push");
+const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || "";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
+const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || "mailto:admin@example.com";
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  console.log("[push] VAPID configured");
+} else {
+  console.log("[push] VAPID keys missing; push endpoints will be no-op until provided.");
+}
+
+// Ensure table
+try {
+  db.prepare(`CREATE TABLE IF NOT EXISTS push_subscriptions(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ns TEXT NOT NULL,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )`).run();
+} catch (e) {
+  console.log("[push] table create error:", e?.message || e);
+}
+
+// Helpers
+function normNS(s){ return String(s || "").trim().toLowerCase() || "default"; }
+
+function upsertSubscription(ns, sub){
+  const endpoint = String(sub?.endpoint || "");
+  const p256dh   = String(sub?.keys?.p256dh || "");
+  const auth     = String(sub?.keys?.auth || "");
+  if (!endpoint || !p256dh || !auth) return false;
+  const now = Date.now();
+  const tx = db.transaction((ns, endpoint, p256dh, auth, now) => {
+    const got = db.prepare("SELECT id FROM push_subscriptions WHERE endpoint=?").get(endpoint);
+    if (got) {
+      db.prepare("UPDATE push_subscriptions SET ns=?, p256dh=?, auth=?, created_at=? WHERE id=?")
+        .run(ns, p256dh, auth, now, got.id);
+    } else {
+      db.prepare("INSERT INTO push_subscriptions(ns, endpoint, p256dh, auth, created_at) VALUES(?,?,?,?,?)")
+        .run(ns, endpoint, p256dh, auth, now);
+    }
+  });
+  tx(ns, endpoint, p256dh, auth, now);
+  return true;
+}
+
+function deleteSubscriptionByEndpoint(endpoint){
+  try {
+    db.prepare("DELETE FROM push_subscriptions WHERE endpoint=?").run(String(endpoint||""));
+    return true;
+  } catch { return false; }
+}
+
+async function sendPushToNS(ns, payload){
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { return { ok:false, error:"vapid_not_configured" }; }
+  ns = normNS(ns);
+  const rows = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ns=?").all(ns);
+  let sent = 0, removed = 0;
+  await Promise.all(rows.map(async (r) => {
+    const sub = {
+      endpoint: r.endpoint,
+      keys: { p256dh: r.p256dh, auth: r.auth }
+    };
+    try {
+      await webpush.sendNotification(sub, JSON.stringify(payload));
+      sent++;
+    } catch (e) {
+      const status = Number(e?.statusCode || e?.statusCode === 0 ? e.statusCode : (e?.statusCode || 0));
+      // 404/410 → endpoint gone → remove
+      if (status === 404 || status === 410) {
+        try { deleteSubscriptionByEndpoint(r.endpoint); removed++; } catch {}
+      }
+    }
+  }));
+  return { ok:true, sent, removed };
+}
+
+// Routes
+app.post("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
+  const ns  = normNS(getNS(req));
+  const sub = req.body?.subscription || null;
+  if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
+  const ok = upsertSubscription(ns, sub);
+  res.json({ ok, ns });
+});
+
+app.delete("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
+  const endpoint = req.body?.endpoint || req.query?.endpoint || "";
+  const ok = endpoint ? deleteSubscriptionByEndpoint(endpoint) : false;
+  res.json({ ok });
+});
+
+app.post("/api/push/test", express.json(), csrfProtection, async (req, res) => {
+  const ns    = normNS(req.body?.ns || getNS(req));
+  const title = String(req.body?.title || "aud");
+  const body  = String(req.body?.body  || "새 알림이 도착했습니다.");
+  const data  = req.body?.data || null;
+  const tag   = req.body?.tag || `test:${Date.now()}`;
+  const payload = { title, body, data, tag };
+  const out = await sendPushToNS(ns, payload);
+  res.json(out);
+});
+
+// Optional wiring: if your like/vote routes emit events, push them here.
+// Example adapters (no harm if never called):
+function notifyLike(ownerNS, itemId, byUserDisplay){
+  const title = "새 좋아요";
+  const body  = byUserDisplay ? `${byUserDisplay}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.";
+  const data  = { url: "/me.html?tab=notifications", kind: "like", itemId };
+  return sendPushToNS(ownerNS, { title, body, data, tag: `like:${itemId}` });
+}
+function notifyVote(ownerNS, itemId, label){
+  const title = "새 투표";
+  const body  = label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.";
+  const data  = { url: "/me.html?tab=notifications", kind: "vote", itemId, label };
+  return sendPushToNS(ownerNS, { title, body, data, tag: `vote:${itemId}` });
+}
+app.locals.notifyLike = notifyLike;
+app.locals.notifyVote = notifyVote;
+
+// If you have Socket.IO client events (fallback), you can listen and relay:
+io.on("connection", (socket) => {
+  socket.on("push:test", async ({ ns, title, body, data }) => {
+    await sendPushToNS(normNS(ns), { title: title||"aud", body: body||"test", data: data||null, tag:`sock:${Date.now()}` });
+  });
+});
+
