@@ -1790,13 +1790,13 @@ server.listen(PORT, () => {
  *      POST   /api/push/test        { ns, title, body, data? }
  * - Helper: sendPushToNS(ns, payload)
  * ====================================================================== */
-const webpush = require("web-push");
+let webpush = null; try { webpush = require("web-push"); } catch (e) { console.log("[push] web-push not installed — push disabled:", e?.message || String(e)); }
 const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || "";
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
 const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || "mailto:admin@example.com";
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  if (webpush) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
   console.log("[push] VAPID configured");
 } else {
   console.log("[push] VAPID keys missing; push endpoints will be no-op until provided.");
