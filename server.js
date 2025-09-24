@@ -427,6 +427,18 @@ function publicUserShape(viewerUid, userRow) {
   };
 }
 
+function authorProfileShape(userRow) {
+  if (!userRow) return null;
+  const email = String(userRow.email || "");
+  const displayName = userRow.displayName || (email ? email.split("@")[0] : null);
+  return {
+    id: userRow.id,
+    email,                     // ← 작성자용: 마스킹 없음
+    displayName,
+    avatarUrl: latestAvatarUrl(userRow.id)
+  };
+}
+
 // 현재 비밀번호 해시 읽기/쓰기
 function getUserPwHash(uid) {
   try {
@@ -1071,16 +1083,45 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         }
 
         for (const it of slice) {
-          const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
-          it.user = authorMap.get(key) || { id: it.ns, displayName: null, avatarUrl: null };
+          // 1) 업로드 메타에 author.email 이 있으면 '작성자'를 최우선으로 사용
+          const authorEmail = it?.author?.email;
+          if (authorEmail && typeof getUserByEmail === "function") {
+            const row = getUserByEmail(String(authorEmail).toLowerCase());
+            it.user = row ? authorProfileShape(row) : {
+              id: authorEmail,
+              email: authorEmail,
+              displayName: (String(authorEmail).split("@")[0] || null),
+              avatarUrl: null
+            };
+          } else {
+            // 2) 없으면 기존 오너 ns 로부터 유저 복원
+            const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
+            const row = authorMap.get(key);
+            it.user = row
+              ? authorProfileShape({               // ← 공개용이 아니라 '작성자' shape 사용
+                  id: row.id,
+                  email: row.email,                 // row.email 은 publicUserShape에서 마스킹일 수 있어 null이면 it.ns 사용
+                  displayName: row.displayName,
+                  avatarUrl: row.avatarUrl
+                })
+              : {
+                  id: it.ns,
+                  email: it.ns,
+                  displayName: (String(it.ns||"").split("@")[0] || null),
+                  avatarUrl: null
+                };
+          }
+
+          // 3) 메타 보강(표시명/아바타)
+          if ((!it.user.displayName || it.user.displayName === null) && it.author?.displayName) it.user.displayName = it.author.displayName;
+          if ((!it.user.avatarUrl   || it.user.avatarUrl   === null) && it.author?.avatarUrl)   it.user.avatarUrl   = it.author.avatarUrl;
+
+          // 4) mine 플래그
           it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
-          // ⬅ 추가: user가 비어있으면 업로드 당시 author 메타로 보강
-          if ((!it.user.displayName || it.user.displayName === null) && it.author?.displayName) {
-            it.user.displayName = it.author.displayName;
-          }
-          if ((!it.user.avatarUrl || it.user.avatarUrl === null) && it.author?.avatarUrl) {
-            it.user.avatarUrl = it.author.avatarUrl;
-          }
+
+          // 5) 알림 라우팅용: id -> owner ns 맵 업데이트
+          if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
+          globalThis.ITEM_OWNER_NS.set(String(it.id), String(it.ns));
         }
 
         const next = (all.length > limit && slice.length)
@@ -1312,26 +1353,35 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
         // 5) owner 정보 + mine 플래그 (+ meta.author 보강)
         try {
-          const nsUsed = out.ns || preferNs;
-          const myns = String(req.session?.uid || '').toLowerCase();
+          // nsUsed: 파일이 위치한 오너 네임스페이스
+          const nsUsed   = out.ns || preferNs;
+          const myns     = String(req.session?.uid || '').toLowerCase();
           const ownerId  = Number(nsUsed);
           const ownerRow = Number.isFinite(ownerId) ? getUserById(ownerId) : null;
-          out.user = ownerRow
-            ? publicUserShape(req.session?.uid, ownerRow)
-            : { id: nsUsed, displayName: null, avatarUrl: null };
 
-          // 작성자명이 비어있으면 업로드 당시 meta.author로 보강
-          if ((!out.user.displayName || out.user.displayName === null) && meta?.author?.displayName) {
-            out.user.displayName = meta.author.displayName;
-          }
-          if ((!out.user.avatarUrl || out.user.avatarUrl === null) && meta?.author?.avatarUrl) {
-            out.user.avatarUrl = meta.author.avatarUrl;
+          // 1) 메타에 author.email 이 있으면 '작성자' 우선
+          const authorEmail = meta?.author?.email;
+          if (authorEmail && typeof getUserByEmail === "function") {
+            const row = getUserByEmail(String(authorEmail).toLowerCase());
+            out.user = row ? authorProfileShape(row) : {
+              id: authorEmail,
+              email: authorEmail,
+              displayName: (String(authorEmail).split("@")[0] || null),
+              avatarUrl: null
+            };
+          } else {
+            // 2) 없으면 오너 ns 기준으로 작성자 추정
+            if (ownerRow) {
+              out.user = authorProfileShape(ownerRow);
+            } else {
+              out.user = { id: nsUsed, email: nsUsed, displayName: null, avatarUrl: null };
+            }
           }
 
-          // 레거시(메타에 author가 전혀 없는) 아이템을 위해 오너 DB 값 재보강
-          if (!out.user.displayName && ownerRow?.display_name) {
-            out.user.displayName = ownerRow.display_name;
-          }
+          // 3) 메타 보강(표시명/아바타)
+          if ((!out.user.displayName || out.user.displayName === null) && meta?.author?.displayName) out.user.displayName = meta.author.displayName;
+          if ((!out.user.avatarUrl   || out.user.avatarUrl   === null) && meta?.author?.avatarUrl)   out.user.avatarUrl   = meta.author.avatarUrl;
+
 
           // ★ 최종 폴백: 이메일 local-part(예: finelee03)
           if (!out.user.displayName && ownerRow?.email) {
@@ -1368,6 +1418,31 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!out.author.email && out.user?.email) out.author.email = out.user.email;
 
         } catch {}
+
+        // 1) 오너 NS 기준으로 owner row 조회
+        const ownerNs = out.ns; // (파일 경로에서 추출된 ns 혹은 기존 계산값)
+        let ownerRow = null;
+        if (Number.isFinite(Number(ownerNs))) {
+          ownerRow = getUserById(Number(ownerNs));
+        } else if (typeof getUserByEmail === "function") {
+          ownerRow = getUserByEmail(String(ownerNs).toLowerCase());
+        }
+
+        // 2) 명시 필드 추가
+        out.owner = { ns: ownerNs };                               // 오너 네임스페이스
+        out.authorProfile = ownerRow ? authorProfileShape(ownerRow) : null;
+
+        // 3) FE 호환: user는 '작성자'로 통일
+        if (out.authorProfile) out.user = out.authorProfile;
+
+        // 4) 업로드 메타(author)로 보강
+        if (!out.user?.displayName && out.author?.displayName) out.user.displayName = out.author.displayName;
+        if (!out.user?.avatarUrl   && out.author?.avatarUrl)   out.user.avatarUrl   = out.author.avatarUrl;
+
+        // 5) 알림 라우팅용 맵 갱신
+        if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
+        globalThis.ITEM_OWNER_NS.set(String(out.id), ownerNs);
+
 
         res.set('Cache-Control', 'no-store');
         return res.json({ ok: true, ...out, item: out });
