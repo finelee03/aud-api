@@ -19,14 +19,12 @@ const compression = require("compression");
 const sharp = require("sharp");
 require("dotenv").config();
 
-const {
-  db,                      // better-sqlite3 handle
+const { db,                      // better-sqlite3 handle
   createUser,
   getUserByEmail,
   getUserById,
   getUserState,
-  putUserState,
-} = require("./db");
+  putUserState, listPushSubscriptions, seenPushEvent } = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
 
@@ -919,7 +917,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           io.emit('item:like', payload);
           // ★ 신규 삽입(=진짜 새 좋아요)이고, 자기 자신이 아닌 경우에만 푸시
           if (ownerNs && info && info.changes > 0 && String(uid) !== String(ownerNs)) {
-            try { app.locals.notifyLike?.(ownerNs, id, /*byUserDisplay*/ null); } catch {}
+            try { app.locals.notifyLike?.(ownerNs, id, uid /* actorNS */, /*byUserDisplay*/ null); } catch {}
           }
         }
         res.json({ ok: true, liked: true, likes: n });
@@ -1142,7 +1140,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
         const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
         if (ownerNs && String(uid) !== String(ownerNs) && prev !== label) {
-          try { app.locals.notifyVote?.(ownerNs, id, label); } catch {}
+          try { app.locals.notifyVote?.(ownerNs, id, uid /* actorNS */, label); } catch {}
         }
       } catch { res.status(500).json({ ok:false }); }
     });
@@ -1987,34 +1985,7 @@ async function sendPushToNS(ns, payload){
   return { ok:true, sent, removed };
 }
 
-// Routes
-app.post("/api/push/subscribe", express.json(), (req, res) => {
-  const ns  = normNS(getNS(req));
-  const sub = req.body?.subscription || null;
-  if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
-  const ok = upsertSubscription(ns, sub);
-  res.json({ ok, ns });
-});
 
-app.delete("/api/push/subscribe", express.json(), (req, res) => {
-  const endpoint = req.body?.endpoint || req.query?.endpoint || "";
-  const ok = endpoint ? deleteSubscriptionByEndpoint(endpoint) : false;
-  res.json({ ok });
-});
-
-app.post("/api/push/test", express.json(), async (req, res) => {
-  const ns    = normNS(req.body?.ns || getNS(req));
-  const title = String(req.body?.title || "aud");
-  const body  = String(req.body?.body  || "새 알림이 도착했습니다.");
-  const data  = req.body?.data || null;
-  const tag   = req.body?.tag || `test:${Date.now()}`;
-  const payload = { title, body, data, tag };
-  const out = await sendPushToNS(ns, payload);
-  res.json(out);
-});
-
-// Optional wiring: if your like/vote routes emit events, push them here.
-// Example adapters (no harm if never called):
 function notifyLike(ownerNS, itemId, byUserDisplay){
   const title = "새 좋아요";
   const body  = byUserDisplay ? `${byUserDisplay}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.";
@@ -2142,13 +2113,16 @@ io.on("connection", (socket) => {
       const ns  = normNS(req.body?.ns || pickNSFromReq(req));
       const uid = String(req.session?.uid || req.body?.uid || "").trim();
 
-      db.prepare(`INSERT OR REPLACE INTO push_subscriptions (endpoint, ns, uid, p256dh, auth, ua, json, created_at) VALUES(@endpoint, @ns, @uid, @p256dh, @auth, @ua, @json, @now)`)
+      db.prepare(`INSERT OR REPLACE INTO push_subscriptions
+        (endpoint, ns, uid, p256dh, auth, ua, json, created_at)
+        VALUES(@endpoint, @ns, @uid, @p256dh, @auth, @ua, @json, @now)`)
         .run({
           endpoint: sub.endpoint,
           ns, uid,
           p256dh: sub.keys.p256dh,
           auth:   sub.keys.auth,
-          ua: String(req.get("user-agent") || ""),
+          ua: String(req.get('user-agent') || ''),
+          json: JSON.stringify(sub),
           now: Date.now()
         });
 
