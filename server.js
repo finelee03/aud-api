@@ -38,6 +38,8 @@ fs.mkdirSync(AVATAR_DIR, { recursive: true });
 // ──────────────────────────────────────────────────────────
 const BOOT_ID = uuid();
 const app = express();
+app.set('trust proxy', 1);
+
 
 // === [PATCH] Always-on CORS headers (before any routes) ===
 (function applyAlwaysOnCORS(app){
@@ -187,7 +189,7 @@ if (CROSS_SITE) {
     origin(origin, cb) {
       if (!origin) return cb(null, true);
       if (!ALLOWED_ORIGINS.length) return cb(null, true);
-      cb(null, ALLOWED_ORIGINS.includes(origin));
+      cb(null, ALLOWED_ORIGINS.includes(String(origin || '').replace(/\/$/, '').toLowerCase()));
     },
     credentials: true,
     methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
