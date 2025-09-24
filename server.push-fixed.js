@@ -2048,6 +2048,7 @@ app.post('/api/push/subscribe', express.json(), (req, res) => {
   if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
   const ok = upsertSubscription(ns, sub);
   res.json({ ok, ns });
+});
 
 app.delete("/api/push/subscribe", express.json(), (req, res) => {
   const endpoint = req.body?.endpoint || req.query?.endpoint || "";
