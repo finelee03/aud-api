@@ -2080,6 +2080,32 @@ app.locals.notifyVote = notifyVote;
 io.on("connection", (socket) => {
   socket.on("push:test", async ({ ns, title, body, data }) => {
     await sendNSPush(normNS(ns), { title: title||"aud", body: body||"test", data: data||null, tag:`sock:${Date.now()}` });
+  socket.on("notify", async (payload = {}) => {
+    try {
+      const kind = String(payload.kind || "");
+      const ns   = normNS(payload.ns || payload.owner?.ns || pickNSFromReq?.({ session:{ uid:null } }) || "");
+      // Map kind -> title/body defaults
+      let title = String(payload.title || "");
+      let body  = String(payload.body  || "");
+      const data = payload.data || {};
+      if (!title || !body) {
+        if (kind === "item:like") {
+          title = title || "새 좋아요";
+          body  = body  || "내 게시물에 좋아요가 추가되었습니다.";
+        } else if (kind === "vote:update") {
+          title = title || "새 투표";
+          const label = payload.label || payload.data?.label;
+          body  = body  || (label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.");
+        } else {
+          title = title || "알림";
+          body  = body  || "새 이벤트가 도착했습니다.";
+        }
+      }
+      await sendNSPush(ns, { title, body, data, tag: String(payload.tag || `${kind}:${payload.id||Date.now()}`) });
+    } catch (e) {
+      console.log("[sock.notify] fail:", e?.message || e);
+    }
+  });
   });
 });
 
@@ -2224,6 +2250,38 @@ io.on("connection", (socket) => {
 
   // 개발용 테스트 발사
   router.post("/push/test", async (req, res) => {
+
+  // friendly notify endpoints used by FE fallback (__firePush)
+  router.post("/notify/like", async (req, res) => {
+    try {
+      const ns  = normNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
+      const id  = String(req.body?.id || req.body?.itemId || req.query?.id || "");
+      const by  = String(req.body?.by || req.body?.actor || req.body?.actorName || "");
+      const r = await sendNSPush(ns, {
+        title: "새 좋아요",
+        body: by ? `${by}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.",
+        data: { url: "/me.html?tab=notifications", kind: "like", itemId: id },
+        tag: `like:${id}`
+      });
+      res.json({ ok:true, ...r });
+    } catch (e) { res.status(500).json({ ok:false, error:String(e?.message||e) }); }
+  });
+
+  router.post("/notify/vote", async (req, res) => {
+    try {
+      const ns  = normNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
+      const id  = String(req.body?.id || req.body?.itemId || req.query?.id || "");
+      const lb  = String(req.body?.label || req.body?.choice || req.body?.data?.label || "");
+      const r = await sendNSPush(ns, {
+        title: "새 투표",
+        body: lb ? `내 게시물에서 '${lb}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.",
+        data: { url: "/me.html?tab=notifications", kind: "vote", itemId: id, label: lb },
+        tag: `vote:${id}`
+      });
+      res.json({ ok:true, ...r });
+    } catch (e) { res.status(500).json({ ok:false, error:String(e?.message||e) }); }
+  });
+
     const ns = normNS(req.body?.ns || pickNSFromReq(req));
     const title = String(req.body?.title || "aud:");
     const body  = String(req.body?.body  || "Test");
