@@ -1089,11 +1089,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
         const counts = emitVoteUpdate(id, ns);
         res.json({ ok:true, id, counts, my: label });
-        // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
-        const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
-        if (ownerNs && String(uid) !== String(ownerNs) && prev !== label) {
-          try { app.locals.notifyVote?.(ownerNs, id, label); } catch {}
-        }
       } catch { res.status(500).json({ ok:false }); }
     });
   }
