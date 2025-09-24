@@ -38,34 +38,6 @@ fs.mkdirSync(AVATAR_DIR, { recursive: true });
 // ──────────────────────────────────────────────────────────
 const BOOT_ID = uuid();
 const app = express();
-app.set('trust proxy', 1);
-
-
-// === [PATCH] Always-on CORS headers (before any routes) ===
-(function applyAlwaysOnCORS(app){
-  try {
-    const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").strip?.() || String(s||"").trim());
-    const ALLOWED = RAW.map(s => s.replace(/\/$/, "").toLowerCase()).filter(Boolean);
-    const ENABLED = (process.env.CROSS_SITE === "1" || process.env.ALLOW_CROSS_SITE === "1");
-    if (!ENABLED) return;
-    app.use((req, res, next) => {
-      const origin = String(req.headers.origin || "").replace(/\/$/, "").toLowerCase();
-      const ok = !ALLOWED.length || ALLOWED.includes(origin);
-      if (ok && origin) {
-        res.setHeader("Access-Control-Allow-Origin", origin);
-        res.setHeader("Vary", "Origin");
-        res.setHeader("Access-Control-Allow-Credentials", "true");
-        res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, x-csrf-token, X-XSRF-Token, x-xsrf-token, Authorization");
-        res.setHeader("Access-Control-Max-Age", "86400");
-      }
-      if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
-      next();
-    });
-  } catch {}
-})(app);
-
-
 const server = http.createServer(app);
 
 // Frontend가 다른 오리진(예: GitHub Pages)일 때 CORS 허용
@@ -189,7 +161,7 @@ if (CROSS_SITE) {
     origin(origin, cb) {
       if (!origin) return cb(null, true);
       if (!ALLOWED_ORIGINS.length) return cb(null, true);
-      cb(null, ALLOWED_ORIGINS.includes(String(origin || '').replace(/\/$/, '').toLowerCase()));
+      cb(null, ALLOWED_ORIGINS.includes(origin));
     },
     credentials: true,
     methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
@@ -249,7 +221,6 @@ const sessionMiddleware = session({
     secure: PROD || CROSS_SITE,
     path: "/",
     maxAge: MAX_AGE_MS,
-    ...(CROSS_SITE ? { partitioned: true } : {}), // ★ CHIPS
   },
 });
 app.use(sessionMiddleware);
@@ -537,7 +508,7 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
     if (err) return res.status(500).json({ ok: false });
     req.session.uid = row.id;
     markNavigate(req);
-    req.session.save(() => { res.json({ ok: true, id: row.id }); });
+    return res.json({ ok: true, id: row.id });
   });
 });
 
