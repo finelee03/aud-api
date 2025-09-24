@@ -1863,7 +1863,7 @@ server.listen(PORT, () => {
  *      POST   /api/push/subscribe   { ns, subscription }
  *      DELETE /api/push/subscribe   { endpoint }
  *      POST   /api/push/test        { ns, title, body, data? }
- * - Helper: sendPushToNS(ns, payload)
+ * - Helper: sendNSPush(ns, payload)
  * ====================================================================== */
 let webpush = null; try { webpush = require("web-push"); } catch (e) { console.log("[push] web-push not installed — push disabled:", e?.message || String(e)); }
 const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || "";
@@ -1961,7 +1961,7 @@ function deleteSubscriptionByEndpoint(endpoint){
   } catch { return false; }
 }
 
-async function sendPushToNS(ns, payload){
+async function sendNSPush(ns, payload){
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { return { ok:false, error:"vapid_not_configured" }; }
   ns = normNS(ns);
   const rows = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ns=?").all(ns);
@@ -1990,13 +1990,13 @@ function notifyLike(ownerNS, itemId, byUserDisplay){
   const title = "새 좋아요";
   const body  = byUserDisplay ? `${byUserDisplay}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.";
   const data  = { url: "/me.html?tab=notifications", kind: "like", itemId };
-  return sendPushToNS(ownerNS, { title, body, data, tag: `like:${itemId}` });
+  return sendNSPush(ownerNS, { title, body, data, tag: `like:${itemId}` });
 }
 function notifyVote(ownerNS, itemId, label){
   const title = "새 투표";
   const body  = label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.";
   const data  = { url: "/me.html?tab=notifications", kind: "vote", itemId, label };
-  return sendPushToNS(ownerNS, { title, body, data, tag: `vote:${itemId}` });
+  return sendNSPush(ownerNS, { title, body, data, tag: `vote:${itemId}` });
 }
 app.locals.notifyLike = notifyLike;
 app.locals.notifyVote = notifyVote;
@@ -2004,7 +2004,7 @@ app.locals.notifyVote = notifyVote;
 // If you have Socket.IO client events (fallback), you can listen and relay:
 io.on("connection", (socket) => {
   socket.on("push:test", async ({ ns, title, body, data }) => {
-    await sendPushToNS(normNS(ns), { title: title||"aud", body: body||"test", data: data||null, tag:`sock:${Date.now()}` });
+    await sendNSPush(normNS(ns), { title: title||"aud", body: body||"test", data: data||null, tag:`sock:${Date.now()}` });
   });
 });
 
@@ -2101,7 +2101,7 @@ io.on("connection", (socket) => {
   const router = express.Router();
 
   router.get("/push/public-key", (req, res) => {
-    res.json({ ok: true, vapidPublicKey: VAPID_PUBLIC, ready: !!READY });
+    res.json({ ok: true, vapidPublicKey: VAPID_PUBLIC_KEY_KEY, ready: !!READY });
   });
 
   router.post("/push/subscribe", (req, res) => {
