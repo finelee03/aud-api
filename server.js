@@ -537,7 +537,7 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
     if (err) return res.status(500).json({ ok: false });
     req.session.uid = row.id;
     markNavigate(req);
-    return res.json({ ok: true, id: row.id });
+    req.session.save(() => { res.json({ ok: true, id: row.id }); });
   });
 });
 
