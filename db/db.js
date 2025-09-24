@@ -277,3 +277,45 @@ module.exports = {
   // util
   withTransaction,
 };
+
+// [ADD] Web Push storage
+db.exec(`
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  ns          TEXT    NOT NULL,
+  endpoint    TEXT    NOT NULL UNIQUE,
+  json        TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_events (
+  ev_key   TEXT PRIMARY KEY,   -- e.g., "like:ITEM:ACTORNS"
+  ts       INTEGER NOT NULL
+);
+`);
+
+function addPushSubscription(ns, sub){
+  const row = db.prepare(`INSERT INTO push_subscriptions (ns, endpoint, json, created_at)
+                          VALUES (LOWER(?), ?, ?, ?) 
+                          ON CONFLICT(endpoint) DO UPDATE SET json=excluded.json, created_at=excluded.created_at`)
+                .run(String(ns||'').toLowerCase(), sub.endpoint, JSON.stringify(sub), Date.now());
+  return true;
+}
+function removePushSubscription(endpoint){
+  db.prepare(`DELETE FROM push_subscriptions WHERE endpoint=?`).run(endpoint);
+  return true;
+}
+function listPushSubscriptions(ns){
+  return db.prepare(`SELECT endpoint, json FROM push_subscriptions WHERE ns=LOWER(?)`).all(String(ns||'').toLowerCase());
+}
+function seenPushEvent(evKey, ttlMs=1000*60*60*24){
+  const now = Date.now();
+  const row = db.prepare(`SELECT ts FROM push_events WHERE ev_key=?`).get(evKey);
+  if (row && (now - Number(row.ts||0) < ttlMs)) return true;
+  db.prepare(`INSERT INTO push_events (ev_key, ts) VALUES (?, ?)
+              ON CONFLICT(ev_key) DO UPDATE SET ts=excluded.ts`).run(evKey, now);
+  return false; // false면 '이번에 처음' == 발사 OK
+}
+
+module.exports.addPushSubscription = addPushSubscription;
+module.exports.removePushSubscription = removePushSubscription;
+module.exports.listPushSubscriptions = listPushSubscriptions;
+module.exports.seenPushEvent = seenPushEvent;
