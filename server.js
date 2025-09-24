@@ -221,6 +221,7 @@ const sessionMiddleware = session({
     secure: PROD || CROSS_SITE,
     path: "/",
     maxAge: MAX_AGE_MS,
+    ...(CROSS_SITE ? { partitioned: true } : {}), // ★ CHIPS
   },
 });
 app.use(sessionMiddleware);
