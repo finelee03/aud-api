@@ -2117,7 +2117,7 @@ io.on("connection", (socket) => {
 
       db.prepare(`INSERT OR REPLACE INTO push_subscriptions
         (endpoint, ns, uid, p256dh, auth, ua, created_at)
-        VALUES(@endpoint, @ns, @uid, @p256dh, @auth, @ua, @now)`)
+        VALUES(@endpoint, @ns, @uid, @p256dh, @auth, @ua, @json, @now)`)
         .run({
           endpoint: sub.endpoint,
           ns, uid,
