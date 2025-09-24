@@ -19,14 +19,12 @@ const compression = require("compression");
 const sharp = require("sharp");
 require("dotenv").config();
 
-const {
-  db,                      // better-sqlite3 handle
+const { db,                      // better-sqlite3 handle
   createUser,
   getUserByEmail,
   getUserById,
   getUserState,
-  putUserState,
-} = require("./db");
+  putUserState, listPushSubscriptions, seenPushEvent } = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
 
@@ -919,7 +917,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           io.emit('item:like', payload);
           // ★ 신규 삽입(=진짜 새 좋아요)이고, 자기 자신이 아닌 경우에만 푸시
           if (ownerNs && info && info.changes > 0 && String(uid) !== String(ownerNs)) {
-            try { app.locals.notifyLike?.(ownerNs, id, /*byUserDisplay*/ null); } catch {}
+            try { app.locals.notifyLike?.(ownerNs, id, uid /* actorNS */, /*byUserDisplay*/ null); } catch {}
           }
         }
         res.json({ ok: true, liked: true, likes: n });
@@ -1142,7 +1140,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
         const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
         if (ownerNs && String(uid) !== String(ownerNs) && prev !== label) {
-          try { app.locals.notifyVote?.(ownerNs, id, label); } catch {}
+          try { app.locals.notifyVote?.(ownerNs, id, uid /* actorNS */, label); } catch {}
         }
       } catch { res.status(500).json({ ok:false }); }
     });
@@ -2161,3 +2159,4 @@ io.on("connection", (socket) => {
   // 여기서는 다시 등록하지 않아도 되지만, 안전하게 라우터 단에서도 허용.
   app.use("/api", express.json({ limit: "512kb" }), router);
 })();
+ㄴ
