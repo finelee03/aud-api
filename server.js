@@ -2101,7 +2101,11 @@ io.on("connection", (socket) => {
   const router = express.Router();
 
   router.get("/push/public-key", (req, res) => {
-    res.json({ ok: true, vapidPublicKey: VAPID_PUBLIC_KEY_KEY, ready: !!READY });
+    const PK = (typeof VAPID_PUBLIC !== "undefined" && VAPID_PUBLIC) 
+      ? VAPID_PUBLIC 
+      : ((typeof VAPID_PUBLIC_KEY !== "undefined" && VAPID_PUBLIC_KEY) ? VAPID_PUBLIC_KEY : "");
+    const isReady = (typeof READY !== "undefined" ? !!READY : (typeof Ready !== "undefined" ? !!Ready : false));
+    res.json({ ok: !!PK, vapidPublicKey: PK || "", ready: isReady, reason: PK ? "ok" : "vapid_missing" });
   });
 
   router.post("/push/subscribe", (req, res) => {
