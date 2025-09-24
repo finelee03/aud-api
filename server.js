@@ -2123,7 +2123,8 @@ io.on("connection", (socket) => {
           ns, uid,
           p256dh: sub.keys.p256dh,
           auth:   sub.keys.auth,
-          ua: String(req.get("user-agent") || ""),
+          ua: String(req.get('user-agent') || ''),
+          json: JSON.stringify(sub),
           now: Date.now()
         });
 
