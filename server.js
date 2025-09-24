@@ -919,7 +919,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           io.emit('item:like', payload);
           // ★ 신규 삽입(=진짜 새 좋아요)이고, 자기 자신이 아닌 경우에만 푸시
           if (ownerNs && info && info.changes > 0 && String(uid) !== String(ownerNs)) {
-            try { app.locals.notifyLike?.(ownerNs, id, /*byUserDisplay*/ null); } catch {}
+            try { app.locals.notifyLike?.(ownerNs, id, /*byUserDisplay*/ null, ns, null); } catch {}
           }
         }
         res.json({ ok: true, liked: true, likes: n });
@@ -1142,7 +1142,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
         const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
         if (ownerNs && String(uid) !== String(ownerNs) && prev !== label) {
-          try { app.locals.notifyVote?.(ownerNs, id, label); } catch {}
+          try { app.locals.notifyVote?.(ownerNs, id, label, ns); } catch {}
         }
       } catch { res.status(500).json({ ok:false }); }
     });
@@ -1987,6 +1987,26 @@ async function sendPushToNS(ns, payload){
   return { ok:true, sent, removed };
 }
 
+
+
+// [ADD] De-dup events per tag within TTL
+try {
+  db.prepare(`CREATE TABLE IF NOT EXISTS push_events (
+    tag TEXT PRIMARY KEY,
+    ts  INTEGER NOT NULL
+  )`).run();
+} catch (e) {
+  console.log("[push] push_events create error:", e?.message || e);
+}
+function seenPushEvent(tag, ttlMs = 1000*60*60*24){
+  try{
+    const row = db.prepare("SELECT ts FROM push_events WHERE tag=?").get(tag);
+    const now = Date.now();
+    if (row && (now - Number(row.ts||0)) < ttlMs) return true;
+    db.prepare("INSERT INTO push_events(tag, ts) VALUES(?, ?) ON CONFLICT(tag) DO UPDATE SET ts=excluded.ts").run(tag, now);
+    return false;
+  } catch { return false; }
+}
 // Routes
 app.post("/api/push/subscribe", express.json(), (req, res) => {
   const ns  = normNS(getNS(req));
