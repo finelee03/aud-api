@@ -2159,4 +2159,3 @@ io.on("connection", (socket) => {
   // 여기서는 다시 등록하지 않아도 되지만, 안전하게 라우터 단에서도 허용.
   app.use("/api", express.json({ limit: "512kb" }), router);
 })();
-ㄴ
