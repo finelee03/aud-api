@@ -301,6 +301,7 @@ const csrfProtection = csrf({
     secure: PROD || CROSS_SITE,
     path: "/",
     signed: true,
+    ...(CROSS_SITE ? { partitioned: true } : {}), // ← CHIPS 대응 (세션과 동일)
   },
   // 헤더(x-csrf-token) 외에 쿼리/바디의 csrf, _csrf도 허용 (레거시 호환)
   value: (req) =>
