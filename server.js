@@ -38,6 +38,54 @@ fs.mkdirSync(AVATAR_DIR, { recursive: true });
 // ──────────────────────────────────────────────────────────
 const BOOT_ID = uuid();
 const app = express();
+app.set('trust proxy', 1);
+
+// === FORCE CORS (hotfix) ===
+app.use((req, res, next) => {
+  const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "https://finelee03.github.io").split(",");
+  const ALLOWED = RAW.map(s => String(s||"").trim().replace(/\/$/, "").toLowerCase()).filter(Boolean);
+  const origin = String(req.headers.origin || "").trim().replace(/\/$/, "").toLowerCase();
+  const ok = !ALLOWED.length || ALLOWED.includes(origin);
+  if (ok && origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, x-csrf-token, X-XSRF-Token, x-xsrf-token, Authorization");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+  if (req.method === "OPTIONS") { res.status(204).end(); return; }
+  next();
+});
+
+
+
+
+// === [PATCH] Always-on CORS headers (before any routes) ===
+(function applyAlwaysOnCORS(app){
+  try {
+    const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").strip?.() || String(s||"").trim());
+    const ALLOWED = RAW.map(s => s.replace(/\/$/, "").toLowerCase()).filter(Boolean);
+    const ENABLED = (process.env.CROSS_SITE === "1" || process.env.ALLOW_CROSS_SITE === "1");
+    if (!ENABLED) return;
+    app.use((req, res, next) => {
+      const origin = String(req.headers.origin || "").replace(/\/$/, "").toLowerCase();
+      const ok = !ALLOWED.length || ALLOWED.includes(origin);
+      if (ok && origin) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+        res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, x-csrf-token, X-XSRF-Token, x-xsrf-token, Authorization");
+        res.setHeader("Access-Control-Max-Age", "86400");
+      }
+      if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
+      next();
+    });
+  } catch {}
+})(app);
+
+
 const server = http.createServer(app);
 
 // Frontend가 다른 오리진(예: GitHub Pages)일 때 CORS 허용
@@ -161,7 +209,7 @@ if (CROSS_SITE) {
     origin(origin, cb) {
       if (!origin) return cb(null, true);
       if (!ALLOWED_ORIGINS.length) return cb(null, true);
-      cb(null, ALLOWED_ORIGINS.includes(origin));
+      cb(null, ALLOWED_ORIGINS.includes(String(origin || '').replace(/\/$/, '').toLowerCase()));
     },
     credentials: true,
     methods: ["GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS"],
@@ -221,9 +269,27 @@ const sessionMiddleware = session({
     secure: PROD || CROSS_SITE,
     path: "/",
     maxAge: MAX_AGE_MS,
+    ...(CROSS_SITE ? { partitioned: true } : {}), // ★ CHIPS
   },
 });
 app.use(sessionMiddleware);
+
+/* [PATCH][ADD-ONLY] CSRF skip for Web Push endpoints */
+(() => {
+  try {
+    // 푸시 관련 경로만 통과시킨다. (public-key / subscribe / unsubscribe / test)
+    const PUSH_SKIP = /^\/api\/push\/(public-key|subscribe|unsubscribe|test)\/?$/i;
+
+    app.use((req, res, next) => {
+      // CSRF 미들웨어 이전에 조기 우회
+      if (PUSH_SKIP.test(req.path)) return next();
+      return next(); // 다른 경로는 기존 체인 그대로 진행 (여기서 csurf가 이어서 적용됨)
+    });
+  } catch (e) {
+    console.log("[push/csrf-skip] setup error:", e?.message || e);
+  }
+})();
+
 
 // CSRF (쿠키 모드)
 const CSRF_COOKIE_NAME = PROD ? "__Host-csrf" : "csrf";
@@ -840,8 +906,9 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const id  = String(req.params.id);
         const uid = req.session.uid;
         const ns  = getNS(req);
-        db.prepare('INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)')
-          .run(id, uid, Date.now());
+        const info = db.prepare(
+          'INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)'
+        ).run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
         {
           const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
@@ -849,6 +916,10 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (ownerNs) payload.owner = { ns: ownerNs };
           io.to(`item:${id}`).emit('item:like', payload);
           io.emit('item:like', payload);
+          // ★ 신규 삽입(=진짜 새 좋아요)이고, 자기 자신이 아닌 경우에만 푸시
+          if (ownerNs && info && info.changes > 0 && String(uid) !== String(ownerNs)) {
+            try { app.locals.notifyLike?.(ownerNs, id, /*byUserDisplay*/ null); } catch {}
+          }
         }
         res.json({ ok: true, liked: true, likes: n });
       } catch { res.status(500).json({ ok: false }); }
@@ -1057,7 +1128,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const ns  = getNS(req);
         const label = String(req.query.label || req.body?.label || req.body?.choice || '').trim();
         if (!isVoteLabel(label)) return res.status(400).json({ ok:false, error:'bad-label' });
-
+        const prev = db.prepare('SELECT label FROM item_votes WHERE item_id=? AND user_id=?').get(id, uid)?.label || null;
         db.prepare(`
           INSERT INTO item_votes(item_id,user_id,label,created_at)
           VALUES(?,?,?,?)
@@ -1067,6 +1138,11 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
         const counts = emitVoteUpdate(id, ns);
         res.json({ ok:true, id, counts, my: label });
+        // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
+        const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+        if (ownerNs && String(uid) !== String(ownerNs) && prev !== label) {
+          try { app.locals.notifyVote?.(ownerNs, id, label); } catch {}
+        }
       } catch { res.status(500).json({ ok:false }); }
     });
   }
@@ -1816,6 +1892,46 @@ try {
   console.log("[push] table create error:", e?.message || e);
 }
 
+/* [PATCH][ADD-ONLY] push_subscriptions schema migrate */
+(() => {
+  try {
+    const hasTable = !!db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='push_subscriptions'"
+    ).get();
+
+    if (!hasTable) {
+      db.prepare(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint   TEXT PRIMARY KEY,
+        ns         TEXT,
+        uid        TEXT,
+        p256dh     TEXT,
+        auth       TEXT,
+        ua         TEXT,
+        created_at INTEGER
+      )`).run();
+    } else {
+      // 안전하게 누락 컬럼만 추가
+      const cols = db.prepare("PRAGMA table_info(push_subscriptions)").all().map(r => r.name);
+      const add = (name, sql) => { if (!cols.includes(name)) db.prepare(sql).run(); };
+      add("ns",        "ALTER TABLE push_subscriptions ADD COLUMN ns TEXT");
+      add("uid",       "ALTER TABLE push_subscriptions ADD COLUMN uid TEXT");
+      add("p256dh",    "ALTER TABLE push_subscriptions ADD COLUMN p256dh TEXT");
+      add("auth",      "ALTER TABLE push_subscriptions ADD COLUMN auth TEXT");
+      add("ua",        "ALTER TABLE push_subscriptions ADD COLUMN ua TEXT");
+      add("created_at","ALTER TABLE push_subscriptions ADD COLUMN created_at INTEGER");
+    }
+
+    // 인덱스(있으면 무시)
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_ns ON push_subscriptions(ns)").run();
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_uid ON push_subscriptions(uid)").run();
+
+    console.log("[push] table ready");
+  } catch (e) {
+    console.log("[push] migrate error:", e?.message || e);
+  }
+})();
+
+
 // Helpers
 function normNS(s){ return String(s || "").trim().toLowerCase() || "default"; }
 
@@ -1871,7 +1987,7 @@ async function sendPushToNS(ns, payload){
 }
 
 // Routes
-app.post("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
+app.post("/api/push/subscribe", express.json(), (req, res) => {
   const ns  = normNS(getNS(req));
   const sub = req.body?.subscription || null;
   if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
@@ -1879,13 +1995,13 @@ app.post("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
   res.json({ ok, ns });
 });
 
-app.delete("/api/push/subscribe", express.json(), csrfProtection, (req, res) => {
+app.delete("/api/push/subscribe", express.json(), (req, res) => {
   const endpoint = req.body?.endpoint || req.query?.endpoint || "";
   const ok = endpoint ? deleteSubscriptionByEndpoint(endpoint) : false;
   res.json({ ok });
 });
 
-app.post("/api/push/test", express.json(), csrfProtection, async (req, res) => {
+app.post("/api/push/test", express.json(), async (req, res) => {
   const ns    = normNS(req.body?.ns || getNS(req));
   const title = String(req.body?.title || "aud");
   const body  = String(req.body?.body  || "새 알림이 도착했습니다.");
