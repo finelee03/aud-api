@@ -2086,13 +2086,13 @@ function notifyLike(ownerNS, itemId, byUserDisplay){
   const title = "새 좋아요";
   const body  = byUserDisplay ? `${byUserDisplay}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.";
   const data  = { url: "/me.html?tab=notifications", kind: "like", itemId };
-  return sendNSPush(ownerNS, { title, body, data, tag: `like:${itemId}` });
+  return sendNSPush(ownerNS, { title, body, data, tag: `like:${itemId}`, kind: "like", itemId });
 }
 function notifyVote(ownerNS, itemId, label){
   const title = "새 투표";
   const body  = label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.";
   const data  = { url: "/me.html?tab=notifications", kind: "vote", itemId, label };
-  return sendNSPush(ownerNS, { title, body, data, tag: `vote:${itemId}` });
+  return sendNSPush(ownerNS, { title, body, data, tag: `vote:${itemId}`, kind: "vote", itemId });
 }
 app.locals.notifyLike = notifyLike;
 app.locals.notifyVote = notifyVote;
