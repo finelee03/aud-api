@@ -2099,34 +2099,24 @@ app.locals.notifyVote = notifyVote;
 
 // If you have Socket.IO client events (fallback), you can listen and relay:
 io.on("connection", (socket) => {
-  socket.on("push:test", async ({ ns, title, body, data }) => {
-    await sendNSPush(normNS(ns), { title: title||"aud", body: body||"test", data: data||null, tag:`sock:${Date.now()}` });
   socket.on("notify", async (payload = {}) => {
     try {
       const kind = String(payload.kind || "");
-      const ns   = normNS(payload.ns || payload.owner?.ns || pickNSFromReq?.({ session:{ uid:null } }) || "");
-      // Map kind -> title/body defaults
+      const rawNs = payload.ns || payload.owner?.ns || pickNSFromReq?.({ session:{ uid:null } }) || "";
+      const ns  = resolvePushNS(rawNs);  // ← 변경
       let title = String(payload.title || "");
       let body  = String(payload.body  || "");
       const data = payload.data || {};
       if (!title || !body) {
-        if (kind === "item:like") {
-          title = title || "새 좋아요";
-          body  = body  || "내 게시물에 좋아요가 추가되었습니다.";
-        } else if (kind === "vote:update") {
-          title = title || "새 투표";
+        if (kind === "item:like") { title ||= "새 좋아요"; body ||= "내 게시물에 좋아요가 추가되었습니다."; }
+        else if (kind === "vote:update") {
+          title ||= "새 투표";
           const label = payload.label || payload.data?.label;
-          body  = body  || (label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.");
-        } else {
-          title = title || "알림";
-          body  = body  || "새 이벤트가 도착했습니다.";
-        }
+          body  ||= (label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.");
+        } else { title ||= "알림"; body ||= "새 이벤트가 도착했습니다."; }
       }
       await sendNSPush(ns, { title, body, data, tag: String(payload.tag || `${kind}:${payload.id||Date.now()}`) });
-    } catch (e) {
-      console.log("[sock.notify] fail:", e?.message || e);
-    }
-  });
+    } catch (e) { console.log("[sock.notify] fail:", e?.message || e); }
   });
 });
 
@@ -2186,6 +2176,27 @@ io.on("connection", (socket) => {
     const s = String(req?.session?.uid || "").trim().toLowerCase();
     return s || "default";
   }
+  function resolvePushNS(ns) {
+    // 왜? push_subscriptions 가 email 키로 저장되어 있어야 일관됨.
+    const v = String(ns || "").trim().toLowerCase();
+    if (!v) return "default";
+    // 이미 email 이면 그대로
+    if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(v)) return v;
+
+    // user:<id> → <id>
+    let id = v;
+    if (id.startsWith("user:")) id = id.slice(5);
+
+    // 숫자 id 라면 users 테이블에서 email 조회
+    if (/^\d+$/.test(id)) {
+      try {
+        const row = db.prepare("SELECT email FROM users WHERE id=?").get(id);
+        if (row && row.email) return String(row.email).trim().toLowerCase();
+      } catch {}
+    }
+    // 최후: 그대로 반환(레거시/개발 중 케이스)
+    return v;
+  }
   function coerceSub(payload){
     if (!payload) return null;
     const ep = String(payload?.endpoint || "").trim();
@@ -2236,7 +2247,9 @@ io.on("connection", (socket) => {
       const sub = coerceSub(req.body && (req.body.subscription || req.body));
       if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
 
-      const ns  = normNS(req.body?.ns || pickNSFromReq(req));
+      const rawNs = req.body?.ns || pickNSFromReq(req);
+      const ns    = resolvePushNS(rawNs);  // ← 변경: normNS → resolvePushNS
+
       const uid = String(req.session?.uid || req.body?.uid || "").trim();
 
       db.prepare(`INSERT OR REPLACE INTO push_subscriptions
@@ -2271,8 +2284,8 @@ io.on("connection", (socket) => {
 
   // 개발용 테스트 발사
   router.post("/push/test", async (req, res) => {
-      try {
-      const ns    = normNS(req.body?.ns || pickNSFromReq(req));
+    try {
+      const ns    = resolvePushNS(req.body?.ns || pickNSFromReq(req));  // ← 변경
       const title = String(req.body?.title || "aud:");
       const body  = String(req.body?.body  || "Test");
       const data  = req.body?.data || { url: "/mine.html" };
@@ -2283,19 +2296,20 @@ io.on("connection", (socket) => {
     } catch (e) {
       res.status(500).json({ ok:false, error: String(e?.message||e) });
     }
-  });  // ← 여기서 /push/test 핸들러를 '바로' 닫아준다
+  });
 
   // friendly notify endpoints used by FE fallback (__firePush)
   router.post("/notify/like", async (req, res) => {
     try {
-      const ns  = normNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
-      const id  = String(req.body?.id || req.body?.itemId || req.query?.id || "");
-      const by  = String(req.body?.by || req.body?.actor || req.body?.actorName || "");
+      const rawNs = req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req);
+      const ns    = resolvePushNS(rawNs);  // ← 변경
+      const id    = String(req.body?.id || req.body?.itemId || req.query?.id || "");
+      const by    = String(req.body?.by || req.body?.actor || req.body?.actorName || "");
       const r = await sendNSPush(ns, {
         title: "새 좋아요",
-        body: by ? `${by}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.",
-        data: { url: "/me.html?tab=notifications", kind: "like", itemId: id },
-        tag: `like:${id}`
+        body:  by ? `${by}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.",
+        data:  { url: "/me.html?tab=notifications", kind: "like", itemId: id },
+        tag:   `like:${id}`
       });
       res.json({ ok:true, ...r });
     } catch (e) { res.status(500).json({ ok:false, error:String(e?.message||e) }); }
@@ -2303,14 +2317,15 @@ io.on("connection", (socket) => {
 
   router.post("/notify/vote", async (req, res) => {
     try {
-      const ns  = normNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
-      const id  = String(req.body?.id || req.body?.itemId || req.query?.id || "");
-      const lb  = String(req.body?.label || req.body?.choice || req.body?.data?.label || "");
+      const rawNs = req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req);
+      const ns    = resolvePushNS(rawNs);  // ← 변경
+      const id    = String(req.body?.id || req.body?.itemId || req.query?.id || "");
+      const lb    = String(req.body?.label || req.body?.choice || req.body?.data?.label || "");
       const r = await sendNSPush(ns, {
         title: "새 투표",
-        body: lb ? `내 게시물에서 '${lb}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.",
-        data: { url: "/me.html?tab=notifications", kind: "vote", itemId: id, label: lb },
-        tag: `vote:${id}`
+        body:  lb ? `내 게시물에서 '${lb}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.",
+        data:  { url: "/me.html?tab=notifications", kind: "vote", itemId: id, label: lb },
+        tag:   `vote:${id}`
       });
       res.json({ ok:true, ...r });
     } catch (e) { res.status(500).json({ ok:false, error:String(e?.message||e) }); }
