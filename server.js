@@ -1978,6 +1978,8 @@ try {
     endpoint TEXT NOT NULL UNIQUE,
     p256dh TEXT NOT NULL,
     auth TEXT NOT NULL,
+    ua TEXT,
+    json TEXT,
     created_at INTEGER NOT NULL
   )`).run();
 } catch (e) {
@@ -2010,6 +2012,7 @@ try {
       add("p256dh",    "ALTER TABLE push_subscriptions ADD COLUMN p256dh TEXT");
       add("auth",      "ALTER TABLE push_subscriptions ADD COLUMN auth TEXT");
       add("ua",        "ALTER TABLE push_subscriptions ADD COLUMN ua TEXT");
+      add("json",      "ALTER TABLE push_subscriptions ADD COLUMN json TEXT");
       add("created_at","ALTER TABLE push_subscriptions ADD COLUMN created_at INTEGER");
     }
 
