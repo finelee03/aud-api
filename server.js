@@ -24,7 +24,7 @@ const { db,                      // better-sqlite3 handle
   getUserByEmail,
   getUserById,
   getUserState,
-  putUserState, listPushSubscriptions, seenPushEvent } = require("./db");
+  putUserState, } = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
 
@@ -59,7 +59,7 @@ app.use((req, res, next) => {
 // === [PATCH] Always-on CORS headers (before any routes) ===
 (function applyAlwaysOnCORS(app){
   try {
-    const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").strip?.() || String(s||"").trim());
+    const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").trim());
     const ALLOWED = RAW.map(s => s.replace(/\/$/, "").toLowerCase()).filter(Boolean);
     const ENABLED = (process.env.CROSS_SITE === "1" || process.env.ALLOW_CROSS_SITE === "1");
     if (!ENABLED) return;
@@ -901,7 +901,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     if (!ownerNs) {
       try {
         const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(itemId) || {};
-        wnerNs = normNS(row.author_email || row.owner_ns || null);
+        ownerNs = resolvePushNS(row.author_email || row.owner_ns || null); // 이메일 NS로 통일
         if (ownerNs) ITEM_OWNER_NS.set(String(itemId), ownerNs);
       } catch {}
     }
@@ -930,7 +930,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              wnerNs = normNS(row.author_email || row.owner_ns || null);
+              ownerNs = resolvePushNS(row.author_email || row.owner_ns || null);
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
@@ -940,7 +940,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           io.emit('item:like', payload);
           // ★ 신규 삽입(=진짜 새 좋아요)이고, 자기 자신이 아닌 경우에만 푸시
           if (ownerNs && info && info.changes > 0 && String(uid) !== String(ownerNs)) {
-            try { app.locals.notifyLike?.(ownerNs, id, uid /* actorNS */, /*byUserDisplay*/ null); } catch {}
+            try { app.locals.notifyLike?.(ownerNs, id, uid, null); } catch {}
           }
         }
         res.json({ ok: true, liked: true, likes: n });
@@ -960,7 +960,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              wnerNs = normNS(row.author_email || row.owner_ns || null);
+              ownerNs = resolvePushNS(row.author_email || row.owner_ns || null);
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
@@ -2023,10 +2023,6 @@ try {
   }
 })();
 
-
-// Helpers
-function normNS(s){ return String(s || "").trim().toLowerCase() || "default"; }
-
 // --- ADD: email-only push namespace resolver ---
 function isEmailNS(v){
   return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(v||"").trim());
@@ -2047,26 +2043,6 @@ function resolvePushNS(ns){
   }
   // fallback to normalized raw (legacy)
   return raw;
-}
-
-function upsertSubscription(ns, sub){
-  const endpoint = String(sub?.endpoint || "");
-  const p256dh   = String(sub?.keys?.p256dh || "");
-  const auth     = String(sub?.keys?.auth || "");
-  if (!endpoint || !p256dh || !auth) return false;
-  const now = Date.now();
-  const tx = db.transaction((ns, endpoint, p256dh, auth, now) => {
-    const got = db.prepare("SELECT id FROM push_subscriptions WHERE endpoint=?").get(endpoint);
-    if (got) {
-      db.prepare("UPDATE push_subscriptions SET ns=?, p256dh=?, auth=?, created_at=? WHERE id=?")
-        .run(ns, p256dh, auth, now, got.id);
-    } else {
-      db.prepare("INSERT INTO push_subscriptions(ns, endpoint, p256dh, auth, created_at) VALUES(?,?,?,?,?)")
-        .run(ns, endpoint, p256dh, auth, now);
-    }
-  });
-  tx(ns, endpoint, p256dh, auth, now);
-  return true;
 }
 
 function deleteSubscriptionByEndpoint(endpoint){
@@ -2185,33 +2161,6 @@ io.on("connection", (socket) => {
     console.log("[push] ensure table failed:", e?.message || e);
   }
 
-  const normNS = (v) => (String(v || "").trim().toLowerCase() || "default");
-  function pickNSFromReq(req){
-    try { if (typeof getNS === "function") return getNS(req); } catch {}
-    const s = String(req?.session?.uid || "").trim().toLowerCase();
-    return s || "default";
-  }
-  function resolvePushNS(ns) {
-    // 왜? push_subscriptions 가 email 키로 저장되어 있어야 일관됨.
-    const v = String(ns || "").trim().toLowerCase();
-    if (!v) return "default";
-    // 이미 email 이면 그대로
-    if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(v)) return v;
-
-    // user:<id> → <id>
-    let id = v;
-    if (id.startsWith("user:")) id = id.slice(5);
-
-    // 숫자 id 라면 users 테이블에서 email 조회
-    if (/^\d+$/.test(id)) {
-      try {
-        const row = db.prepare("SELECT email FROM users WHERE id=?").get(id);
-        if (row && row.email) return String(row.email).trim().toLowerCase();
-      } catch {}
-    }
-    // 최후: 그대로 반환(레거시/개발 중 케이스)
-    return v;
-  }
   function coerceSub(payload){
     if (!payload) return null;
     const ep = String(payload?.endpoint || "").trim();
@@ -2282,7 +2231,7 @@ io.on("connection", (socket) => {
       const data  = req.body?.data || { url: "/mine.html" };
       const tag   = req.body?.tag  || `test:${Date.now()}`;
       const payload = { title, body, data, tag };
-      const r = await __sendNSPush(ns, payload);
+      const r = await sendNSPush(ns, payload);
       res.json({ ok:true, ns, ...r });
     } catch (e) {
       res.status(500).json({ ok:false, error: String(e?.message||e) });
