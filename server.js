@@ -900,7 +900,14 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
   }
   function emitVoteUpdate(itemId, ns){
     const counts = voteCountsOf(itemId);
-    const ownerNs = ITEM_OWNER_NS.get(String(itemId)) || null;
+    let ownerNs = ITEM_OWNER_NS.get(String(itemId)) || null;
+    if (!ownerNs) {
+      try {
+        const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(itemId) || {};
+        ownerNs = normNS(row.owner_ns || row.author_email || null);
+        if (ownerNs) ITEM_OWNER_NS.set(String(itemId), ownerNs);
+      } catch {}
+    }
     const payload = { id: itemId, ns, counts, ts: Date.now() };
     if (ownerNs) payload.owner = { ns: ownerNs };
     io.to(`item:${itemId}`).emit('vote:update', payload);
@@ -922,7 +929,14 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         ).run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
         {
-          const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+          let ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+          if (!ownerNs) {
+            try {
+              const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
+              ownerNs = normNS(row.owner_ns || row.author_email || null);
+              if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
+            } catch {}
+          }
           const payload = { id, ns, likes: n, liked: true, by: uid, ts: Date.now() };
           if (ownerNs) payload.owner = { ns: ownerNs };
           io.to(`item:${id}`).emit('item:like', payload);
@@ -945,7 +959,14 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         db.prepare('DELETE FROM item_likes WHERE item_id=? AND user_id=?').run(id, uid);
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
         {
-          const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+          let ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
+          if (!ownerNs) {
+            try {
+              const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
+              ownerNs = normNS(row.owner_ns || row.author_email || null);
+              if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
+            } catch {}
+          }
           const payload = { id, ns, likes: n, liked: false, by: uid, ts: Date.now() };
           if (ownerNs) payload.owner = { ns: ownerNs };
           io.to(`item:${id}`).emit('item:like', payload);
