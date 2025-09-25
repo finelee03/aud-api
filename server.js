@@ -2271,6 +2271,19 @@ io.on("connection", (socket) => {
 
   // 개발용 테스트 발사
   router.post("/push/test", async (req, res) => {
+      try {
+      const ns    = normNS(req.body?.ns || pickNSFromReq(req));
+      const title = String(req.body?.title || "aud:");
+      const body  = String(req.body?.body  || "Test");
+      const data  = req.body?.data || { url: "/mine.html" };
+      const tag   = req.body?.tag  || `test:${Date.now()}`;
+      const payload = { title, body, data, tag };
+      const r = await __sendNSPush(ns, payload);
+      res.json({ ok:true, ns, ...r });
+    } catch (e) {
+      res.status(500).json({ ok:false, error: String(e?.message||e) });
+    }
+  });  // ← 여기서 /push/test 핸들러를 '바로' 닫아준다
 
   // friendly notify endpoints used by FE fallback (__firePush)
   router.post("/notify/like", async (req, res) => {
@@ -2301,16 +2314,6 @@ io.on("connection", (socket) => {
       });
       res.json({ ok:true, ...r });
     } catch (e) { res.status(500).json({ ok:false, error:String(e?.message||e) }); }
-  });
-
-    const ns = normNS(req.body?.ns || pickNSFromReq(req));
-    const title = String(req.body?.title || "aud:");
-    const body  = String(req.body?.body  || "Test");
-    const data  = req.body?.data || { url: "/mine.html" };
-    const tag   = req.body?.tag  || `test:${Date.now()}`;
-    const payload = { title, body, data, tag };
-    const r = await __sendNSPush(ns, payload);
-    res.json({ ok:true, ns, ...r });
   });
 
   // JSON 바디 파서가 앞에서 이미 app.use(express.json())으로 등록되어 있다면
