@@ -2094,7 +2094,7 @@ async function sendNSPush(ns, payload){
   }));
   return { ok:true, sent, removed };
 }
-try { global.sendNSPush = __sendNSPush; } catch {}
+global.sendNSPush = sendNSPush;
 
 
 function notifyLike(ownerNS, itemId, byUserDisplay){
