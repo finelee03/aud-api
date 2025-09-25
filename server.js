@@ -56,9 +56,6 @@ app.use((req, res, next) => {
   next();
 });
 
-
-
-
 // === [PATCH] Always-on CORS headers (before any routes) ===
 (function applyAlwaysOnCORS(app){
   try {
@@ -2030,6 +2027,28 @@ try {
 // Helpers
 function normNS(s){ return String(s || "").trim().toLowerCase() || "default"; }
 
+// --- ADD: email-only push namespace resolver ---
+function isEmailNS(v){
+  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(v||"").trim());
+}
+function resolvePushNS(ns){
+  const raw = String(ns || "").trim().toLowerCase();
+  if (!raw) return "default";
+  if (isEmailNS(raw)) return raw;
+  // strip "user:"
+  const v = raw.startsWith("user:") ? raw.slice(5) : raw;
+  // numeric → users.email lookup
+  if (/^\d+$/.test(v)) {
+    try {
+      const row = getUserById ? getUserById(Number(v)) : null;  // ← server.js 상단에서 이미 import 되어 있음
+      const email = String(row?.email || "").trim().toLowerCase();
+      if (email) return email;
+    } catch {}
+  }
+  // fallback to normalized raw (legacy)
+  return raw;
+}
+
 function upsertSubscription(ns, sub){
   const endpoint = String(sub?.endpoint || "");
   const p256dh   = String(sub?.keys?.p256dh || "");
@@ -2059,7 +2078,7 @@ function deleteSubscriptionByEndpoint(endpoint){
 
 async function sendNSPush(ns, payload){
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { return { ok:false, error:"vapid_not_configured" }; }
-  ns = normNS(ns);
+  ns = resolvePushNS(ns);
   const rows = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ns=?").all(ns);
   let sent = 0, removed = 0;
   await Promise.all(rows.map(async (r) => {
@@ -2248,7 +2267,7 @@ io.on("connection", (socket) => {
       if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
 
       const rawNs = req.body?.ns || pickNSFromReq(req);
-      const ns    = resolvePushNS(rawNs);  // ← 변경: normNS → resolvePushNS
+      const ns  = resolvePushNS(req.body?.ns || pickNSFromReq(req));
 
       const uid = String(req.session?.uid || req.body?.uid || "").trim();
 
@@ -2285,7 +2304,7 @@ io.on("connection", (socket) => {
   // 개발용 테스트 발사
   router.post("/push/test", async (req, res) => {
     try {
-      const ns    = resolvePushNS(req.body?.ns || pickNSFromReq(req));  // ← 변경
+      const ns    = resolvePushNS(req.body?.ns || pickNSFromReq(req));
       const title = String(req.body?.title || "aud:");
       const body  = String(req.body?.body  || "Test");
       const data  = req.body?.data || { url: "/mine.html" };
@@ -2302,7 +2321,7 @@ io.on("connection", (socket) => {
   router.post("/notify/like", async (req, res) => {
     try {
       const rawNs = req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req);
-      const ns    = resolvePushNS(rawNs);  // ← 변경
+      const ns  = resolvePushNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
       const id    = String(req.body?.id || req.body?.itemId || req.query?.id || "");
       const by    = String(req.body?.by || req.body?.actor || req.body?.actorName || "");
       const r = await sendNSPush(ns, {
@@ -2318,7 +2337,7 @@ io.on("connection", (socket) => {
   router.post("/notify/vote", async (req, res) => {
     try {
       const rawNs = req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req);
-      const ns    = resolvePushNS(rawNs);  // ← 변경
+      const ns  = resolvePushNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
       const id    = String(req.body?.id || req.body?.itemId || req.query?.id || "");
       const lb    = String(req.body?.label || req.body?.choice || req.body?.data?.label || "");
       const r = await sendNSPush(ns, {
