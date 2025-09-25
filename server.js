@@ -904,7 +904,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     if (!ownerNs) {
       try {
         const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(itemId) || {};
-        ownerNs = normNS(row.owner_ns || row.author_email || null);
+        wnerNs = normNS(row.author_email || row.owner_ns || null);
         if (ownerNs) ITEM_OWNER_NS.set(String(itemId), ownerNs);
       } catch {}
     }
@@ -933,7 +933,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              ownerNs = normNS(row.owner_ns || row.author_email || null);
+              wnerNs = normNS(row.author_email || row.owner_ns || null);
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
@@ -963,7 +963,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              ownerNs = normNS(row.owner_ns || row.author_email || null);
+              wnerNs = normNS(row.author_email || row.owner_ns || null);
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
