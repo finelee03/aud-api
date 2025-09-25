@@ -2076,25 +2076,20 @@ function deleteSubscriptionByEndpoint(endpoint){
   } catch { return false; }
 }
 
+// [UNIFY] single canonical definition (email-NS)
 async function sendNSPush(ns, payload){
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { return { ok:false, error:"vapid_not_configured" }; }
-  ns = resolvePushNS(ns);
+  ns = resolvePushNS(ns); // ← use email canonicalization
   const rows = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ns=?").all(ns);
   let sent = 0, removed = 0;
   await Promise.all(rows.map(async (r) => {
-    const sub = {
-      endpoint: r.endpoint,
-      keys: { p256dh: r.p256dh, auth: r.auth }
-    };
+    const sub = { endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } };
     try {
       await webpush.sendNotification(sub, JSON.stringify(payload));
       sent++;
     } catch (e) {
-      const status = Number(e?.statusCode || e?.statusCode === 0 ? e.statusCode : (e?.statusCode || 0));
-      // 404/410 → endpoint gone → remove
-      if (status === 404 || status === 410) {
-        try { deleteSubscriptionByEndpoint(r.endpoint); removed++; } catch {}
-      }
+      const status = Number(e?.statusCode || e?.status || 0);
+      if (status === 404 || 410 === status) { try { deleteSubscriptionByEndpoint(r.endpoint); removed++; } catch {} }
     }
   }));
   return { ok:true, sent, removed };
