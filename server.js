@@ -2099,6 +2099,7 @@ async function sendNSPush(ns, payload){
   }));
   return { ok:true, sent, removed };
 }
+try { global.sendNSPush = __sendNSPush; } catch {}
 
 
 function notifyLike(ownerNS, itemId, byUserDisplay){
@@ -2225,30 +2226,6 @@ io.on("connection", (socket) => {
     if (!ep || !p256dh || !auth) return null;
     return { endpoint: ep, keys: { p256dh, auth } };
   }
-
-  async function __sendNSPush(ns, notify){
-    if (!READY) return { ok:false, error:"webpush_not_ready" };
-    const NS = normNS(ns);
-    const rowset = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ns=?").all(NS);
-    if (!rowset.length) return { ok:true, sent:0 };
-    let sent = 0, stale = 0;
-    for (const r of rowset){
-      const sub = { endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } };
-      try {
-        await webpush.sendNotification(sub, JSON.stringify(notify || {}));
-        sent++;
-      } catch (e) {
-        const status = e?.statusCode || e?.status || 0;
-        if (status === 404 || status === 410) {
-          try { db.prepare("DELETE FROM push_subscriptions WHERE endpoint=?").run(r.endpoint); stale++; } catch {}
-        } else {
-          console.log("[push] send fail:", status, e?.message || e);
-        }
-      }
-    }
-    return { ok:true, sent, stale };
-  }
-  try { global.sendNSPush = __sendNSPush; } catch {}
 
   const router = express.Router();
 
