@@ -17,7 +17,6 @@ const { z } = require("zod");
 const { v4: uuid } = require("uuid");
 const compression = require("compression");
 const sharp = require("sharp");
-const path = require("path");
 require("dotenv").config();
 
 const { db,                      // better-sqlite3 handle
@@ -813,7 +812,7 @@ app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
 // ──────────────────────────────────────────────────────────
 mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
-mountIfExists(path.join(__dirname, "audlab-router")); // mounts at /api
+mountIfExists(path.join(__dirname, "audlab-router"), "/"); // mounts at /api
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
 
