@@ -1838,8 +1838,10 @@ app.use(express.static(PUBLIC_DIR));
 app.get("/", (_, res) => res.sendFile(path.join(PUBLIC_DIR, "home.html")));
 
 // ──────────────────────────────────────────────────────────
-io.engine.use(sessionMiddleware);
-io.on("connection", (sock) => {
+ // Socket.IO가 정상 초기화된 경우에만 등록
+ if (io && typeof io.on === "function") {
+   io.engine.use(sessionMiddleware);
+   io.on("connection", (sock) => {
   sock.on("subscribe", (payload = {}) => {
     // 1) 라벨 조인(기존 유지)
     const labels = Array.isArray(payload.labels)
@@ -1880,7 +1882,10 @@ io.on("connection", (sock) => {
       // 캐시는 유지(다른 소켓이 여전히 감시 중일 수 있음)
     }
   });
-});
+   });
+ } else {
+   console.warn("[socket.io] io.on unavailable; skipping primary connection handlers");
+ }
 
 // ──────────────────────────────────────────────────────────
 function printRoutesSafe() {
@@ -2016,7 +2021,7 @@ function deleteSubscriptionByEndpoint(endpoint){
 // [UNIFY] single canonical definition (email-NS)
 async function sendNSPush(ns, payload){
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { return { ok:false, error:"vapid_not_configured" }; }
-  ns = resolvePushNS(ns); // ← use email canonicalization
+  ns = String(ns || '').trim().toLowerCase(); // ← use email canonicalization
   const rows = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ns=?").all(ns);
   let sent = 0, removed = 0;
   await Promise.all(rows.map(async (r) => {
@@ -2035,24 +2040,21 @@ global.sendNSPush = sendNSPush;
 
 
 // If you have Socket.IO client events (fallback), you can listen and relay:
-io.on("connection", (socket) => {
-  socket.on("notify", async (payload = {}) => {
-    try {
-      const kind = String(payload.kind || "");
-      const rawNs = payload.ns || payload.owner?.ns || pickNSFromReq?.({ session:{ uid:null } }) || "";
-      const ns  = resolvePushNS(rawNs);  // ← 변경
-      let title = String(payload.title || "");
-      let body  = String(payload.body  || "");
-      const data = payload.data || {};
-      if (!title || !body) {
-        if (kind === "item:like") { title ||= "새 좋아요"; body ||= "내 게시물에 좋아요가 추가되었습니다."; }
-        else if (kind === "vote:update") {
-          title ||= "새 투표";
-          const label = payload.label || payload.data?.label;
-          body  ||= (label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.");
-        } else { title ||= "알림"; body ||= "새 이벤트가 도착했습니다."; }
-      }
-      await sendNSPush(ns, { title, body, data, tag: String(payload.tag || `${kind}:${payload.id||Date.now()}`) });
-    } catch (e) { console.log("[sock.notify] fail:", e?.message || e); }
-  });
-})();
+ // Fallback notify relay: Socket.IO가 있을 때만 등록
+ if (io && typeof io.on === "function") {
+   io.on("connection", (socket) => {
+     socket.on("notify", async (payload = {}) => {
+       try {
+         const kind = String(payload.kind || "");
+         const rawNs = payload.ns || payload.owner?.ns || pickNSFromReq?.({ session:{ uid:null } }) || "";
+         const ns  = resolvePushNS(rawNs);
+         // …
+         await sendNSPush(ns, { title, body, data, tag: String(payload.tag || `${kind}:${payload.id||Date.now()}`) });
+       } catch (e) {
+         console.log("[sock.notify] fail:", e?.message || e);
+       }
+     });
+   });
+ } else {
+   console.warn("[socket.io] io.on unavailable; skipping notify relay");
+ }
