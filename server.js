@@ -144,6 +144,24 @@ function mountIfExists(basePath, mountPath = "/api") {
   }
 }
 
+// minimal resolver used by feed routes (no push)
+function resolvePushNS(ns) {
+  const raw = String(ns || "").trim().toLowerCase();
+  if (!raw) return "";
+  const isEmail = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(raw);
+  if (isEmail) return raw;
+  const v = raw.startsWith("user:") ? raw.slice(5) : raw;
+  if (/^\d+$/.test(v)) {
+    try {
+      const row = getUserById ? getUserById(Number(v)) : null;
+      const email = String(row?.email || "").trim().toLowerCase();
+      if (email) return email;
+    } catch {}
+  }
+  return raw;
+}
+ㄴ
+
 // ──────────────────────────────────────────────────────────
 // 업로드 준비 (메모리 → 디스크 저장)
 // ──────────────────────────────────────────────────────────
@@ -268,6 +286,7 @@ const sessionMiddleware = session({
   },
 });
 app.use(sessionMiddleware);
+
 
 // CSRF (쿠키 모드)
 const CSRF_COOKIE_NAME = PROD ? "__Host-csrf" : "csrf";
@@ -884,7 +903,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     if (!ownerNs) {
       try {
         const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(itemId) || {};
-        ownerNs = String(row.author_email || row.owner_ns || '').toLowerCase(); // 이메일 NS로 통일
+        ownerNs = resolvePushNS(row.author_email || row.owner_ns || null); // 이메일 NS로 통일
         if (ownerNs) ITEM_OWNER_NS.set(String(itemId), ownerNs);
       } catch {}
     }
@@ -913,7 +932,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              ownerNs = String(row.author_email || row.owner_ns || '').toLowerCase();
+              ownerNs = resolvePushNS(row.author_email || row.owner_ns || null);
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
@@ -939,7 +958,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              ownerNs = String(row.author_email || row.owner_ns || '').toLowerCase();
+              ownerNs = resolvePushNS(row.author_email || row.owner_ns || null);
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
@@ -1838,10 +1857,8 @@ app.use(express.static(PUBLIC_DIR));
 app.get("/", (_, res) => res.sendFile(path.join(PUBLIC_DIR, "home.html")));
 
 // ──────────────────────────────────────────────────────────
- // Socket.IO가 정상 초기화된 경우에만 등록
- if (io && typeof io.on === "function") {
-   io.engine.use(sessionMiddleware);
-   io.on("connection", (sock) => {
+io.engine.use(sessionMiddleware);
+io.on("connection", (sock) => {
   sock.on("subscribe", (payload = {}) => {
     // 1) 라벨 조인(기존 유지)
     const labels = Array.isArray(payload.labels)
@@ -1882,10 +1899,7 @@ app.get("/", (_, res) => res.sendFile(path.join(PUBLIC_DIR, "home.html")));
       // 캐시는 유지(다른 소켓이 여전히 감시 중일 수 있음)
     }
   });
-   });
- } else {
-   console.warn("[socket.io] io.on unavailable; skipping primary connection handlers");
- }
+});
 
 // ──────────────────────────────────────────────────────────
 function printRoutesSafe() {
@@ -1926,135 +1940,3 @@ server.listen(PORT, () => {
     console.log("[ble] bridge failed to start:", e?.message || e);
   }
 });
-
-
-/* ======================================================================
- * Web Push subsystem (append-only)
- * - Requires env: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT
- * - Creates table push_subscriptions(ns, endpoint, p256dh, auth, created_at)
- * - Routes:
- *      POST   /api/push/subscribe   { ns, subscription }
- *      DELETE /api/push/subscribe   { endpoint }
- *      POST   /api/push/test        { ns, title, body, data? }
- * - Helper: sendNSPush(ns, payload)
- * ====================================================================== */
-let webpush = null; try { webpush = require("web-push"); } catch (e) { console.log("[push] web-push not installed — push disabled:", e?.message || String(e)); }
-const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || "";
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
-const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || "mailto:admin@example.com";
-
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  if (webpush) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-  console.log("[push] VAPID configured");
-} else {
-  console.log("[push] VAPID keys missing; push endpoints will be no-op until provided.");
-}
-
-// Ensure table
-try {
-  db.prepare(`CREATE TABLE IF NOT EXISTS push_subscriptions(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ns TEXT NOT NULL,
-    endpoint TEXT NOT NULL UNIQUE,
-    p256dh TEXT NOT NULL,
-    auth TEXT NOT NULL,
-    ua TEXT,
-    json TEXT,
-    created_at INTEGER NOT NULL
-  )`).run();
-} catch (e) {
-  console.log("[push] table create error:", e?.message || e);
-}
-
-/* [PATCH][ADD-ONLY] push_subscriptions schema migrate */
-(() => {
-  try {
-    const hasTable = !!db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='push_subscriptions'"
-    ).get();
-
-    if (!hasTable) {
-      db.prepare(`CREATE TABLE IF NOT EXISTS push_subscriptions (
-        endpoint   TEXT PRIMARY KEY,
-        ns         TEXT,
-        uid        TEXT,
-        p256dh     TEXT,
-        auth       TEXT,
-        ua         TEXT,
-        created_at INTEGER
-      )`).run();
-    } else {
-      // 안전하게 누락 컬럼만 추가
-      const cols = db.prepare("PRAGMA table_info(push_subscriptions)").all().map(r => r.name);
-      const add = (name, sql) => { if (!cols.includes(name)) db.prepare(sql).run(); };
-      add("ns",        "ALTER TABLE push_subscriptions ADD COLUMN ns TEXT");
-      add("uid",       "ALTER TABLE push_subscriptions ADD COLUMN uid TEXT");
-      add("p256dh",    "ALTER TABLE push_subscriptions ADD COLUMN p256dh TEXT");
-      add("auth",      "ALTER TABLE push_subscriptions ADD COLUMN auth TEXT");
-      add("ua",        "ALTER TABLE push_subscriptions ADD COLUMN ua TEXT");
-      add("json",      "ALTER TABLE push_subscriptions ADD COLUMN json TEXT");
-      add("created_at","ALTER TABLE push_subscriptions ADD COLUMN created_at INTEGER");
-    }
-
-    // 인덱스(있으면 무시)
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_ns ON push_subscriptions(ns)").run();
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_uid ON push_subscriptions(uid)").run();
-
-    console.log("[push] table ready");
-  } catch (e) {
-    console.log("[push] migrate error:", e?.message || e);
-  }
-})();
-
-// --- ADD: email-only push namespace resolver ---
-function isEmailNS(v){
-  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(v||"").trim());
-}
-
-function deleteSubscriptionByEndpoint(endpoint){
-  try {
-    db.prepare("DELETE FROM push_subscriptions WHERE endpoint=?").run(String(endpoint||""));
-    return true;
-  } catch { return false; }
-}
-
-// [UNIFY] single canonical definition (email-NS)
-async function sendNSPush(ns, payload){
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { return { ok:false, error:"vapid_not_configured" }; }
-  ns = String(ns || '').trim().toLowerCase(); // ← use email canonicalization
-  const rows = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE ns=?").all(ns);
-  let sent = 0, removed = 0;
-  await Promise.all(rows.map(async (r) => {
-    const sub = { endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } };
-    try {
-      await webpush.sendNotification(sub, JSON.stringify(payload));
-      sent++;
-    } catch (e) {
-      const status = Number(e?.statusCode || e?.status || 0);
-      if (status === 404 || 410 === status) { try { deleteSubscriptionByEndpoint(r.endpoint); removed++; } catch {} }
-    }
-  }));
-  return { ok:true, sent, removed };
-}
-global.sendNSPush = sendNSPush;
-
-
-// If you have Socket.IO client events (fallback), you can listen and relay:
- // Fallback notify relay: Socket.IO가 있을 때만 등록
- if (io && typeof io.on === "function") {
-   io.on("connection", (socket) => {
-     socket.on("notify", async (payload = {}) => {
-       try {
-         const kind = String(payload.kind || "");
-         const rawNs = payload.ns || payload.owner?.ns || pickNSFromReq?.({ session:{ uid:null } }) || "";
-         const ns  = resolvePushNS(rawNs);
-         // …
-         await sendNSPush(ns, { title, body, data, tag: String(payload.tag || `${kind}:${payload.id||Date.now()}`) });
-       } catch (e) {
-         console.log("[sock.notify] fail:", e?.message || e);
-       }
-     });
-   });
- } else {
-   console.warn("[socket.io] io.on unavailable; skipping notify relay");
- }
