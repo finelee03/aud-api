@@ -269,23 +269,6 @@ const sessionMiddleware = session({
 });
 app.use(sessionMiddleware);
 
-/* [PATCH][ADD-ONLY] CSRF skip for Web Push endpoints */
-(() => {
-  try {
-    // 푸시 관련 경로만 통과시킨다. (public-key / subscribe / unsubscribe / test)
-    const PUSH_SKIP = /^\/api\/push\/(public-key|subscribe|unsubscribe|test)\/?$/i;
-
-    app.use((req, res, next) => {
-      // CSRF 미들웨어 이전에 조기 우회
-      if (PUSH_SKIP.test(req.path)) return next();
-      return next(); // 다른 경로는 기존 체인 그대로 진행 (여기서 csurf가 이어서 적용됨)
-    });
-  } catch (e) {
-    console.log("[push/csrf-skip] setup error:", e?.message || e);
-  }
-})();
-
-
 // CSRF (쿠키 모드)
 const CSRF_COOKIE_NAME = PROD ? "__Host-csrf" : "csrf";
 const csrfProtection = csrf({
@@ -901,7 +884,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     if (!ownerNs) {
       try {
         const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(itemId) || {};
-        ownerNs = resolvePushNS(row.author_email || row.owner_ns || null); // 이메일 NS로 통일
+        ownerNs = String(row.author_email || row.owner_ns || '').toLowerCase(); // 이메일 NS로 통일
         if (ownerNs) ITEM_OWNER_NS.set(String(itemId), ownerNs);
       } catch {}
     }
@@ -930,7 +913,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              ownerNs = resolvePushNS(row.author_email || row.owner_ns || null);
+              ownerNs = String(row.author_email || row.owner_ns || '').toLowerCase();
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
@@ -938,10 +921,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (ownerNs) payload.owner = { ns: ownerNs };
           io.to(`item:${id}`).emit('item:like', payload);
           io.emit('item:like', payload);
-          // ★ 신규 삽입(=진짜 새 좋아요)이고, 자기 자신이 아닌 경우에만 푸시
-          if (ownerNs && info && info.changes > 0 && String(uid) !== String(ownerNs)) {
-            try { app.locals.notifyLike?.(ownerNs, id, uid, null); } catch {}
-          }
         }
         res.json({ ok: true, liked: true, likes: n });
       } catch { res.status(500).json({ ok: false }); }
@@ -960,7 +939,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (!ownerNs) {
             try {
               const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(id) || {};
-              ownerNs = resolvePushNS(row.author_email || row.owner_ns || null);
+              ownerNs = String(row.author_email || row.owner_ns || '').toLowerCase();
               if (ownerNs) ITEM_OWNER_NS.set(String(id), ownerNs);
             } catch {}
           }
@@ -1197,10 +1176,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const counts = emitVoteUpdate(id, ns);
         res.json({ ok:true, id, counts, my: label });
         // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
-        const ownerNs = ITEM_OWNER_NS.get(String(id)) || null;
-        if (ownerNs && String(uid) !== String(ownerNs) && prev !== label) {
-          try { app.locals.notifyVote?.(ownerNs, id, uid /* actorNS */, label); } catch {}
-        }
       } catch { res.status(500).json({ ok:false }); }
     });
   }
@@ -2030,23 +2005,6 @@ try {
 function isEmailNS(v){
   return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(v||"").trim());
 }
-function resolvePushNS(ns){
-  const raw = String(ns || "").trim().toLowerCase();
-  if (!raw) return "default";
-  if (isEmailNS(raw)) return raw;
-  // strip "user:"
-  const v = raw.startsWith("user:") ? raw.slice(5) : raw;
-  // numeric → users.email lookup
-  if (/^\d+$/.test(v)) {
-    try {
-      const row = getUserById ? getUserById(Number(v)) : null;  // ← server.js 상단에서 이미 import 되어 있음
-      const email = String(row?.email || "").trim().toLowerCase();
-      if (email) return email;
-    } catch {}
-  }
-  // fallback to normalized raw (legacy)
-  return raw;
-}
 
 function deleteSubscriptionByEndpoint(endpoint){
   try {
@@ -2076,21 +2034,6 @@ async function sendNSPush(ns, payload){
 global.sendNSPush = sendNSPush;
 
 
-function notifyLike(ownerNS, itemId, byUserDisplay){
-  const title = "새 좋아요";
-  const body  = byUserDisplay ? `${byUserDisplay}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.";
-  const data  = { url: "/me.html?tab=notifications", kind: "like", itemId };
-  return sendNSPush(ownerNS, { title, body, data, tag: `like:${itemId}`, kind: "like", itemId });
-}
-function notifyVote(ownerNS, itemId, label){
-  const title = "새 투표";
-  const body  = label ? `내 게시물에서 '${label}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.";
-  const data  = { url: "/me.html?tab=notifications", kind: "vote", itemId, label };
-  return sendNSPush(ownerNS, { title, body, data, tag: `vote:${itemId}`, kind: "vote", itemId });
-}
-app.locals.notifyLike = notifyLike;
-app.locals.notifyVote = notifyVote;
-
 // If you have Socket.IO client events (fallback), you can listen and relay:
 io.on("connection", (socket) => {
   socket.on("notify", async (payload = {}) => {
@@ -2112,169 +2055,4 @@ io.on("connection", (socket) => {
       await sendNSPush(ns, { title, body, data, tag: String(payload.tag || `${kind}:${payload.id||Date.now()}`) });
     } catch (e) { console.log("[sock.notify] fail:", e?.message || e); }
   });
-});
-
-/* ─────────────────────────────────────────────────────────────────────────
- * [PATCH][ADD-ONLY] Web Push (VAPID) + 구독 라우트
- * - 기존 server.js 내용은 그대로 유지. 이 블록만 추가.
- * - 필요 의존성: npm i web-push
- * - ENV: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT
- * - 전역 헬퍼: global.sendNSPush(ns, {title, body, data:{url}, tag, ...})
- * ───────────────────────────────────────────────────────────────────────── */
-(() => {
-  const express = require("express");
-  let webpush = null;
-  try { webpush = require("web-push"); } catch {}
-
-  if (typeof app === "undefined" || typeof db === "undefined") {
-    console.log("[push] skip: app/db not ready at this point");
-    return;
-  }
-
-  const VAPID_PUBLIC  = process.env.VAPID_PUBLIC_KEY  || process.env.VAPID_PUBLIC  || "";
-  const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || process.env.VAPID_PRIVATE || "";
-  const VAPID_SUBJECT = process.env.VAPID_SUBJECT     || "mailto:admin@example.com";
-  let READY = false;
-
-  if (webpush && VAPID_PUBLIC && VAPID_PRIVATE) {
-    try {
-      webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE);
-      READY = true;
-    } catch (e) {
-      console.log("[web-push] setVapidDetails failed:", e?.message || e);
-    }
-  } else {
-    console.log("[web-push] disabled (missing module or VAPID keys)");
-  }
-
-  // DB 테이블 보장
-  try {
-    db.prepare(`CREATE TABLE IF NOT EXISTS push_subscriptions (
-      endpoint   TEXT PRIMARY KEY,
-      ns         TEXT,
-      uid        TEXT,
-      p256dh     TEXT,
-      auth       TEXT,
-      ua         TEXT,
-      created_at INTEGER
-    )`).run();
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_ns ON push_subscriptions(ns)").run();
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_push_uid ON push_subscriptions(uid)").run();
-  } catch (e) {
-    console.log("[push] ensure table failed:", e?.message || e);
-  }
-
-  function coerceSub(payload){
-    if (!payload) return null;
-    const ep = String(payload?.endpoint || "").trim();
-    const keys = payload?.keys || {};
-    const p256dh = String(keys?.p256dh || "").trim();
-    const auth   = String(keys?.auth || "").trim();
-    if (!ep || !p256dh || !auth) return null;
-    return { endpoint: ep, keys: { p256dh, auth } };
-  }
-
-  const router = express.Router();
-
-  router.get("/push/public-key", (req, res) => {
-    const PK = (typeof VAPID_PUBLIC !== "undefined" && VAPID_PUBLIC) 
-      ? VAPID_PUBLIC 
-      : ((typeof VAPID_PUBLIC_KEY !== "undefined" && VAPID_PUBLIC_KEY) ? VAPID_PUBLIC_KEY : "");
-    const isReady = (typeof READY !== "undefined" ? !!READY : (typeof Ready !== "undefined" ? !!Ready : false));
-    res.json({ ok: !!PK, vapidPublicKey: PK || "", ready: isReady, reason: PK ? "ok" : "vapid_missing" });
-  });
-
-  router.post("/push/subscribe", (req, res) => {
-    try {
-      if (!READY) return res.status(501).json({ ok:false, error:"webpush_not_enabled" });
-      const sub = coerceSub(req.body && (req.body.subscription || req.body));
-      if (!sub) return res.status(400).json({ ok:false, error:"invalid_subscription" });
-
-      const rawNs = req.body?.ns || pickNSFromReq(req);
-      const ns  = resolvePushNS(req.body?.ns || pickNSFromReq(req));
-
-      const uid = String(req.session?.uid || req.body?.uid || "").trim();
-
-      db.prepare(`INSERT OR REPLACE INTO push_subscriptions
-        (endpoint, ns, uid, p256dh, auth, ua, json, created_at)
-        VALUES(@endpoint, @ns, @uid, @p256dh, @auth, @ua, @json, @now)`)
-        .run({
-          endpoint: sub.endpoint,
-          ns, uid,
-          p256dh: sub.keys.p256dh,
-          auth:   sub.keys.auth,
-          ua: String(req.get('user-agent') || ''),
-          json: JSON.stringify(sub),
-          now: Date.now()
-        });
-
-      res.json({ ok:true, ns, endpoint: sub.endpoint });
-    } catch (e) {
-      res.status(500).json({ ok:false, error: e?.message || String(e) });
-    }
-  });
-
-  router.post("/push/unsubscribe", (req, res) => {
-    try {
-      const sub = coerceSub(req.body && (req.body.subscription || req.body));
-      if (!sub || !sub.endpoint) return res.status(400).json({ ok:false, error:"invalid_subscription" });
-      db.prepare("DELETE FROM push_subscriptions WHERE endpoint=?").run(sub.endpoint);
-      res.json({ ok:true });
-    } catch (e) {
-      res.status(500).json({ ok:false, error: e?.message || String(e) });
-    }
-  });
-
-  // 개발용 테스트 발사
-  router.post("/push/test", async (req, res) => {
-    try {
-      const ns    = resolvePushNS(req.body?.ns || pickNSFromReq(req));
-      const title = String(req.body?.title || "aud:");
-      const body  = String(req.body?.body  || "Test");
-      const data  = req.body?.data || { url: "/mine.html" };
-      const tag   = req.body?.tag  || `test:${Date.now()}`;
-      const payload = { title, body, data, tag };
-      const r = await sendNSPush(ns, payload);
-      res.json({ ok:true, ns, ...r });
-    } catch (e) {
-      res.status(500).json({ ok:false, error: String(e?.message||e) });
-    }
-  });
-
-  // friendly notify endpoints used by FE fallback (__firePush)
-  router.post("/notify/like", async (req, res) => {
-    try {
-      const rawNs = req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req);
-      const ns  = resolvePushNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
-      const id    = String(req.body?.id || req.body?.itemId || req.query?.id || "");
-      const by    = String(req.body?.by || req.body?.actor || req.body?.actorName || "");
-      const r = await sendNSPush(ns, {
-        title: "새 좋아요",
-        body:  by ? `${by}님이 내 게시물을 좋아했습니다.` : "내 게시물에 좋아요가 추가되었습니다.",
-        data:  { url: "/me.html?tab=notifications", kind: "like", itemId: id },
-        tag:   `like:${id}`
-      });
-      res.json({ ok:true, ...r });
-    } catch (e) { res.status(500).json({ ok:false, error:String(e?.message||e) }); }
-  });
-
-  router.post("/notify/vote", async (req, res) => {
-    try {
-      const rawNs = req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req);
-      const ns  = resolvePushNS(req.body?.ns || req.body?.owner?.ns || pickNSFromReq(req));
-      const id    = String(req.body?.id || req.body?.itemId || req.query?.id || "");
-      const lb    = String(req.body?.label || req.body?.choice || req.body?.data?.label || "");
-      const r = await sendNSPush(ns, {
-        title: "새 투표",
-        body:  lb ? `내 게시물에서 '${lb}' 투표가 발생했습니다.` : "내 게시물에 투표가 발생했습니다.",
-        data:  { url: "/me.html?tab=notifications", kind: "vote", itemId: id, label: lb },
-        tag:   `vote:${id}`
-      });
-      res.json({ ok:true, ...r });
-    } catch (e) { res.status(500).json({ ok:false, error:String(e?.message||e) }); }
-  });
-
-  // JSON 바디 파서가 앞에서 이미 app.use(express.json())으로 등록되어 있다면
-  // 여기서는 다시 등록하지 않아도 되지만, 안전하게 라우터 단에서도 허용.
-  app.use("/api", express.json({ limit: "512kb" }), router);
 })();
