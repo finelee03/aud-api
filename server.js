@@ -59,7 +59,7 @@ app.use((req, res, next) => {
 // === [PATCH] Always-on CORS headers (before any routes) ===
 (function applyAlwaysOnCORS(app){
   try {
-    const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").trim());
+    const RAW = (process.env.ALLOWED_ORIGINS || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").trim());
     const ALLOWED = RAW.map(s => s.replace(/\/$/, "").toLowerCase()).filter(Boolean);
     const ENABLED = (process.env.CROSS_SITE === "1" || process.env.ALLOW_CROSS_SITE === "1");
     if (!ENABLED) return;
