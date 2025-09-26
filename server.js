@@ -988,26 +988,21 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const [aTsStr, aId = ''] = afterParam ? afterParam.split('-') : [];
         const afterTs = Number(aTsStr || 0);
 
-        // 1) ns 필터 원문
-        const nsFilterRaw = String(req.query.ns || '').trim().toLowerCase();
+        const nsFilter    = String(req.query.ns || '').trim().toLowerCase();
+        const labelFilter = String(req.query.label || '').trim();
 
-        // 2) 이메일이면 uid 대안(nsAlt)도 함께 준비
-        let nsFilter = nsFilterRaw;
-        let nsAlt = null;
-        if (nsFilter && nsFilter.includes("@") && typeof getUserByEmail === "function") {
-          try {
-            const row = getUserByEmail(nsFilter);
-            if (row && row.id != null) nsAlt = String(row.id).toLowerCase();
-          } catch {}
-        }
-
-        // 3) 디렉터리 후보 필터링: 이메일 폴더 또는 uid 폴더 모두 허용
-        if (nsFilter) {
-          nss = nss.filter(ns => {
-            const v = String(ns).toLowerCase();
-            return v === nsFilter || (nsAlt && v === nsAlt);
+        const SKIP_DIRS = new Set(['avatars']); // 아바타 폴더 제외
+        // 1) ns 디렉토리 나열
+        let nss = [];
+        try {
+          nss = fs.readdirSync(UPLOAD_ROOT).filter(d => {
+            try {
+              if (SKIP_DIRS.has(d)) return false;
+              return fs.lstatSync(path.join(UPLOAD_ROOT, d)).isDirectory();
+            } catch { return false; }
           });
-        }
+        } catch {}
+        if (nsFilter) nss = nss.filter(ns => String(ns).toLowerCase() === nsFilter);
 
         const EXT_MIME = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp', gif:'image/gif' };
 
