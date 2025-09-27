@@ -866,6 +866,11 @@ app.post(
       files[0] || null;
 
     let buf = picked?.buffer || null;
+    // 파일 mimetype 화이트리스트
+    if (picked && !isAllowedImageMime(picked.mimetype)) {
+      return res.status(400).json({ ok:false, msg:"bad_image_mime" });
+    }
+
 
     // 2) 파일이 없으면 dataURL 폴백 (avatar/dataURL/dataUrl/avatarDataURL/thumbDataURL)
     if (!buf) {
@@ -876,17 +881,27 @@ app.post(
         req.body?.avatarDataURL ||
         req.body?.thumbDataURL || "";
       const decoded = decodeDataURL(raw);
-      if (decoded) buf = decoded.buf;
+      if (decoded && (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime))) {
+        return res.status(400).json({ ok:false, msg:"bad_image_mime" });
+      }
+      if (decoded && decoded.buf.length > 8 * 1024 * 1024) {
+        return res.status(413).json({ ok:false, msg:"image_too_large" });
+      }
     }
 
     if (!buf) return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
 
     // 3) 정규화: 512x512 WebP
-    const outBuf = await sharp(buf)
-      .rotate()
-      .resize(512, 512, { fit: "cover" })
-      .webp({ quality: 90 })
-      .toBuffer();
+    let outBuf;
+    try {
+      outBuf = await sharp(buf)
+        .rotate()
+        .resize(512, 512, { fit: "cover" })
+        .webp({ quality: 90 })
+        .toBuffer();
+    } catch (e) {
+      return res.status(400).json({ ok:false, msg:"invalid_image" });
+    }
 
     const filename = `${uid}-${Date.now()}.webp`;
     fs.writeFileSync(path.join(AVATAR_DIR, filename), outBuf);
@@ -1815,15 +1830,34 @@ app.post(["/api/gallery/upload", "/api/gallery"],
       let ext = "png";
       let mime = "image/png";
 
+      // (A) multer 파일도 이미지 화이트리스트 체크
+      if (req.file && !isAllowedImageMime(req.file.mimetype)) {
+        return res.status(400).json({ ok:false, error:"bad_image_mime" });
+      }
+
       if (!fileBuf && thumbDataURL) {
         const decoded = decodeDataURL(thumbDataURL);
-        if (decoded) { fileBuf = decoded.buf; ext = decoded.ext; mime = decoded.mime; }
+        if (decoded) {
+          if (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime)) {
+            return res.status(400).json({ ok:false, error:"bad_image_mime" });
+         }
+          // dataURL 경로 용량 가드 (예: 8MB)
+          if (decoded.buf.length > 8 * 1024 * 1024) {
+            return res.status(413).json({ ok:false, error:"image_too_large" });
+          }
+          fileBuf = decoded.buf; ext = decoded.ext; mime = decoded.mime;
+        }
       }
 
       if (!fileBuf) return res.status(400).json({ ok: false, error: "no-image" });
 
-      const filename = `${id}.${ext}`;
-      fs.writeFileSync(path.join(dir, filename), fileBuf);
+      const filename = `${safeId}.${ext}`;
+      const outPath  = path.join(dir, filename);
+      // 최종 경로가 dir 내부인지 확인(더블 세이프가드)
+      if (!outPath.startsWith(dir + path.sep)) {
+        return res.status(400).json({ ok:false, error:"bad-path" });
+      }
+      fs.writeFileSync(outPath, fileBuf);
 
       // 2) 메타 저장(확장자/타입 포함)
       const meta = {
