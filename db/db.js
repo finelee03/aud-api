@@ -78,6 +78,22 @@ function normalizeNS(ns) {
   return String(ns || "").trim().toLowerCase();
 }
 
+ // ====== [ADD] Hard delete user (with cascade) ======
+ function deleteUser(userId) {
+   userId = Number(userId);
+   if (!Number.isFinite(userId)) return false;
+   return withTransaction(() => {
+     try {
+       // 보강: 상태 테이블 선정리(구버전/임시 데이터 대비)
+       try { deleteAllStatesForUser(userId); } catch {}
+       const info = db.prepare(`DELETE FROM users WHERE id=?`).run(userId);
+       return info.changes > 0;
+     } catch {
+       return false;
+     }
+   });
+ }
+
 // ─────────────────────────────────────────────────────────────
 // Prepared Statements
 // ─────────────────────────────────────────────────────────────
@@ -304,6 +320,8 @@ module.exports = {
   getUserByEmail,
   getUserById,
   updateUserProfile,
+  deleteUser,                 // [ADD]
+  deleteAllStatesForUser,     // [ADD] ensure exported
 
   // states
   getUserState,

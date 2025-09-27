@@ -53,13 +53,34 @@ const {
   getUserById,
   getUserState,
   putUserState,
-  putStateByEmail, // ✅ add
+  putStateByEmail, // ✅ email-ns 저장
+  deleteUser,             // [ADD]
 } = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
 
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
+const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
+fs.mkdirSync(AUDLAB_ROOT, { recursive: true });
+
+// [ADD] 유저 업로드/아바타 파일 하드 삭제
+function removeUserUploads(email, uid) {
+  try {
+    const nsDir = path.join(AUDLAB_ROOT, encodeURIComponent(String(email || "").toLowerCase()));
+    try { if (fs.existsSync(nsDir)) fs.rmSync(nsDir, { recursive: true, force: true }); } catch {}
+  } catch {}
+  try {
+    if (uid != null) {
+      const files = fs.readdirSync(AVATAR_DIR);
+      for (const f of files) {
+        if (f.startsWith(`${uid}-`) && /\.(webp|png|jpe?g|gif)$/i.test(f)) {
+          try { fs.unlinkSync(path.join(AVATAR_DIR, f)); } catch {}
+        }
+      }
+    }
+  } catch {}
+}
 
 function findFirstExisting(dir, id, exts) {
   for (const e of exts) {
@@ -173,7 +194,6 @@ function resolvePushNS(ns) {
 }
 // 3) 이메일 전용 NS 선택기
 function emailNS(req, nsInput) {
-  // 왜: 클라이언트/서버 혼선 방지. 항상 이메일.
   const cand = resolvePushNS(nsInput);
   if (cand && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(cand)) return cand;
   try {
@@ -197,7 +217,7 @@ const ALLOWED_AUDIO_MIMES = new Set([
   "audio/webm",
   "audio/ogg;codecs=opus",
   "audio/ogg",
-  "audio/mpeg",  // mp3
+  "audio/mpeg",
   "audio/wav",
   "audio/x-wav",
   "audio/mp4",
@@ -220,52 +240,31 @@ function isAllowedAudioMime(mime) {
 // ──────────────────────────────────────────────────────────
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { fileSize: 20 * 1024 * 1024 },
 });
 const UPLOAD_ROOT = path.join(__dirname, "public", "uploads");
-// 서브 라우터들이 동일 경로를 쓰도록 환경변수로 공유
 process.env.UPLOAD_ROOT = process.env.UPLOAD_ROOT || UPLOAD_ROOT;
-// 파일시스템 기반 퍼블릭 피드 폴백 라우트를 항상 장착
 process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
 process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 function ensureDir(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
 
-// dataURL(base64) → Buffer 디코더 (image + audio 지원)
+// dataURL → Buffer
 function decodeDataURL(dataURL) {
   const m = String(dataURL || "").match(/^data:([a-z0-9.+/-]+);base64,(.+)$/i);
   if (!m) return null;
   const mime = m[1].toLowerCase();
   const buf  = Buffer.from(m[2], "base64");
-
-  // mime → 확장자 매핑
   const map = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/jpg": "jpg",
-    "image/webp": "webp",
-    "image/gif": "gif",
-
-    // 오디오
-    "audio/webm;codecs=opus": "webm",
-    "audio/webm": "webm",
-    "audio/ogg": "ogg",
-    "audio/ogg;codecs=opus": "ogg",
-    "audio/mpeg": "mp3",
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/mp4": "m4a",
-    "audio/aac": "m4a",
+    "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif",
+    "audio/webm;codecs=opus": "webm", "audio/webm": "webm", "audio/ogg": "ogg", "audio/ogg;codecs=opus": "ogg",
+    "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/aac": "m4a",
   };
-
-  // 불특정 파라미터가 붙어도 base mime으로 매핑
   const baseMime = mime.split(";")[0];
   const ext =
     map[mime] || map[baseMime] ||
     (baseMime.startsWith("image/") ? baseMime.split("/")[1] : null) ||
-    (baseMime.startsWith("audio/") ? baseMime.split("/")[1] : null) ||
-    "bin";
-
+    (baseMime.startsWith("audio/") ? baseMime.split("/")[1] : null) || "bin";
   return { mime, buf, ext };
 }
 
@@ -274,17 +273,14 @@ function getNS(req) {
   const norm = (s='') => String(s).trim().toLowerCase();
   const raw = norm(req.body?.ns || req.query?.ns || '');
   if (isEmail(raw)) return raw;
-  // 강제: 세션 사용자 이메일 (로그인 요구 라우트이므로 여기가 항상 채워져야 정상)
   return emailNS(req, null) || "";
 }
-
 
 // ──────────────────────────────────────────────────────────
 // 보안/미들웨어
 // ──────────────────────────────────────────────────────────
 app.disable("x-powered-by");
 
-// ── CORS (교차 출처 프런트 허용) ───────────────────────────────
 if (CROSS_SITE) {
   const corsOptions = {
     origin(origin, cb) {
@@ -331,23 +327,22 @@ app.use(
 );
 
 app.use(express.json({ limit: "5mb" }));
-const bigJson = express.json({ limit: "30mb" }); // audlab 전용
+const bigJson = express.json({ limit: "30mb" });
 app.use(express.urlencoded({ extended: false }));
-app.use(cookieParser(SESSION_SECRET)); // CSRF(cookie 모드) 서명용
-// why: 오디오는 압축 대상 제외(스트리밍/Range와 충돌 방지)
+app.use(cookieParser(SESSION_SECRET));
 app.use(compression({
   filter: (req, res) => {
     const ct = String(res.getHeader("Content-Type")||"").toLowerCase();
     if (ct.startsWith("audio/")) return false;
     return compression.filter(req, res);
   }
-}));                // 응답 압축
+}));
 
 // 세션
 const SqliteStore = SqliteStoreFactory(session);
 const sessionDB = new Sqlite(path.join(__dirname, "sessions.sqlite"));
-const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;        // 7일(ms)
-const MAX_AGE_SEC = Math.floor(MAX_AGE_MS / 1000); // 7일(sec)
+const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
+const MAX_AGE_SEC = Math.floor(MAX_AGE_MS / 1000);
 
 const sessionMiddleware = session({
   store: new SqliteStore({
@@ -359,18 +354,17 @@ const sessionMiddleware = session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  rolling: true, // 활동 시 만료 갱신
+  rolling: true,
   cookie: {
     httpOnly: true,
     sameSite: CROSS_SITE ? "none" : "lax",
     secure: PROD || CROSS_SITE,
     path: "/",
     maxAge: MAX_AGE_MS,
-    ...(CROSS_SITE ? { partitioned: true } : {}), // ★ CHIPS
+    ...(CROSS_SITE ? { partitioned: true } : {}),
   },
 });
 app.use(sessionMiddleware);
-
 
 // CSRF (쿠키 모드)
 const CSRF_COOKIE_NAME = PROD ? "__Host-csrf" : "csrf";
@@ -382,9 +376,8 @@ const csrfProtection = csrf({
     secure: PROD || CROSS_SITE,
     path: "/",
     signed: true,
-    ...(CROSS_SITE ? { partitioned: true } : {}), // ← CHIPS 대응 (세션과 동일)
+    ...(CROSS_SITE ? { partitioned: true } : {}),
   },
-  // 헤더(x-csrf-token) 외에 쿼리/바디의 csrf, _csrf도 허용 (레거시 호환)
   value: (req) =>
     req.get("x-csrf-token") ||
     req.headers["x-xsrf-token"] ||
@@ -395,11 +388,9 @@ const csrfProtection = csrf({
 // 유틸 미들웨어
 function ensureAuth(req, res, next) {
   if (req.session?.uid) return next();
-
   const wantsJSON =
     req.path.startsWith("/api") ||
     (req.get("accept") || "").includes("application/json");
-
   if (wantsJSON) return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
   const nextUrl = req.originalUrl || "/";
   return res.redirect("/login.html?next=" + encodeURIComponent(nextUrl));
@@ -427,8 +418,6 @@ function statusPayload(req) {
     expires: authed ? req.session.cookie.expires : null,
   };
 }
-
-// 입력 검증
 
 // ──────────────────────────────────────────────────────────
 // [ADD] 프로필/비밀번호 변경 유틸 + 스키마 + 핸들러
@@ -461,15 +450,15 @@ function ensureDisplayNameColumn() {
   if (!cols.has("display_name")) {
     try {
       db.prepare("ALTER TABLE users ADD COLUMN display_name TEXT").run();
-      _userColsCache = null; // 캐시 무효화
-    } catch { /* 이미 있거나 ALTER 불가 → 무시 */ }
+      _userColsCache = null;
+    } catch {}
   }
 }
 // ──────────────────────────────────────────────────────────
 // Public profile helpers
 // ──────────────────────────────────────────────────────────
-const AVATAR_TTL_MS = 10_000; // 간단 캐시
-const _avatarCache = new Map(); // uid -> { url, t }
+const AVATAR_TTL_MS = 10_000;
+const _avatarCache = new Map();
 
 function latestAvatarUrl(uid) {
   try {
@@ -508,7 +497,6 @@ function publicUserShape(viewerUid, userRow) {
   const email  = String(userRow.email || "");
   const masked = self ? email : (email ? email.replace(/^(.).+(@.*)$/, "$1***$2") : null);
 
-  // 1차: DB display_name → 2차: 이메일 local-part
   const dn = getDisplayNameById(userRow.id) || (email ? email.split("@")[0] : null);
 
   return {
@@ -525,13 +513,12 @@ function authorProfileShape(userRow) {
   const displayName = userRow.displayName || (email ? email.split("@")[0] : null);
   return {
     id: userRow.id,
-    email,                     // ← 작성자용: 마스킹 없음
+    email,
     displayName,
     avatarUrl: latestAvatarUrl(userRow.id)
   };
 }
 
-// 현재 비밀번호 해시 읽기/쓰기
 function getUserPwHash(uid) {
   try {
     const col = pwHashColName();
@@ -544,21 +531,18 @@ function setUserPassword(uid, newHash) {
   const info = db.prepare(`UPDATE users SET ${col}=? WHERE id=?`).run(newHash, uid);
   return info.changes > 0;
 }
-
-// display_name 쓰기
 function setUserDisplayName(uid, name) {
   ensureDisplayNameColumn();
   const info = db.prepare("UPDATE users SET display_name=? WHERE id=?").run(name, uid);
   return info.changes > 0;
 }
 
-// Zod 스키마 (여러 FE 호환)
 const PwChange = z.object({
   currentPassword: z.string().min(1).max(200),
   newPassword: z.string().min(8).max(200)
 }).or(z.object({
   currentPassword: z.string().min(1).max(200),
-  password: z.string().min(8).max(200) // 일부 클라가 newPassword 대신 password를 씀
+  password: z.string().min(8).max(200)
 }).transform(v => ({ currentPassword: v.currentPassword, newPassword: v.password })));
 
 const NameChange = z.object({
@@ -567,7 +551,6 @@ const NameChange = z.object({
   name: z.string().trim().min(1).max(60)
 }).transform(v => ({ displayName: v.name })));
 
-// 실제 처리기
 async function applyPasswordChange(req, res) {
   const parsed = PwChange.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ ok:false, error:"INVALID" });
@@ -608,18 +591,38 @@ const EmailPw = z.object({
 // ──────────────────────────────────────────────────────────
 // 인증 라우트
 // ──────────────────────────────────────────────────────────
-// [NEW] Keepalive ping (GET) — same shape as /auth/me
+
+async function handleAccountDelete(req, res) {
+  if (!req.session?.uid) return res.status(401).json({ ok:false, error:"auth_required" });
+
+  const uid = req.session.uid;
+  const row = getUserById(uid);
+  const email = row?.email || "";
+
+  removeUserUploads(email, uid); // why: 디스크 클린업
+  deleteUser(uid);               // why: FK CASCADE
+
+  const name = PROD ? "__Host-sid" : "sid";
+  const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
+  const done = () => {
+    try { res.clearCookie(name, clearOpts); } catch {}
+    try { res.clearCookie(CSRF_COOKIE_NAME, clearOpts); } catch {}
+    return res.status(204).end();
+  };
+  return req.session ? req.session.destroy(done) : done();
+}
+
+// [NEW] Keepalive ping (GET)
 app.get("/auth/ping", (req, res) => {
   sendNoStore(res);
   try {
     if (req.session) {
       req.session.lastPingAt = Date.now();
-      if (typeof req.session.touch === "function") req.session.touch(); // rolling 보강
+      if (typeof req.session.touch === "function") req.session.touch();
     }
   } catch {}
-  return res.json(statusPayload(req)); // { ok, authenticated, bootId, expires }
+  return res.json(statusPayload(req));
 });
-
 
 app.get("/auth/csrf", csrfProtection, (req, res) => {
   return res.json({ csrfToken: req.csrfToken() });
@@ -631,10 +634,7 @@ app.post("/auth/signup", csrfProtection, async (req, res) => {
 
   const { email, password } = parsed.data;
   const hash = await argon2.hash(password, {
-    type: argon2.argon2id,
-    memoryCost: 65536,
-    timeCost: 3,
-    parallelism: 1,
+    type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1,
   });
 
   try {
@@ -669,7 +669,7 @@ app.post("/auth/nav", (req, res) => {
   return res.json({ ok: true });
 });
 
-// 명시적 로그아웃 (CSRF 필요)
+// 명시적 로그아웃
 app.post("/auth/logout", csrfProtection, (req, res) => {
   const name = PROD ? "__Host-sid" : "sid";
   const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
@@ -681,7 +681,7 @@ app.post("/auth/logout", csrfProtection, (req, res) => {
   return req.session ? req.session.destroy(done) : done();
 });
 
-// 마지막 탭 종료/비콘 로그아웃 (CSRF 없음)
+// 마지막 탭 종료/비콘 로그아웃
 app.post("/auth/logout-beacon", (req, res) => {
   const origin = req.get("origin");
   const host = req.get("host");
@@ -690,7 +690,7 @@ app.post("/auth/logout-beacon", (req, res) => {
     try {
       const u = new URL(origin);
       if (u.host !== host) return res.status(403).json({ ok: false });
-    } catch { /* malformed origin → 동오리진만 도달하므로 허용 */ }
+    } catch {}
   }
   if (isRecentNavigate(req)) {
     return res.json({ ok: true, skipped: "recent-nav" });
@@ -707,6 +707,7 @@ app.post("/auth/logout-beacon", (req, res) => {
     res.json({ ok: true });
   });
 });
+
 app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
   try {
     const slot = ensureUserAudlabDir(req);
@@ -715,12 +716,10 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
     const { ns, dir } = slot;
     const id = `lab_${Date.now()}`;
 
-    // 1) PNG 저장 (previewDataURL 필수)
     const decodedImg = decodeDataURL(req.body?.previewDataURL || req.body?.thumbDataURL || "");
     if (!decodedImg || !/^image\//.test(decodedImg.mime) || !isAllowedImageMime(decodedImg.mime)) {
       return res.status(400).json({ ok:false, error:"bad_preview_mime" });
     }
-    // (선택) dataURL 경로 용량 가드 — 8MB 정도 권장
     if (decodedImg.buf.length > 8 * 1024 * 1024) {
       return res.status(413).json({ ok:false, error:"image_too_large" });
     }
@@ -729,17 +728,14 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
     const imgMime = decodedImg.mime || "image/png";
     fs.writeFileSync(path.join(dir, `${id}.${imgExt}`), decodedImg.buf);
 
-    // 2) (옵션) 오디오 저장
     let audioExt = null;
     let audioMime = null;
     if (req.body?.audioDataURL) {
       const decodedAud = decodeDataURL(req.body.audioDataURL);
       if (decodedAud && /^audio\//.test(decodedAud.mime)) {
-        // ★ 화이트리스트 체크
         if (!isAllowedAudioMime(decodedAud.mime)) {
           return res.status(400).json({ ok:false, error:"bad_audio_mime" });
         }
-        // (선택) dataURL 경로 용량 가드 — 12MB 정도 권장
         if (decodedAud.buf.length > 12 * 1024 * 1024) {
           return res.status(413).json({ ok:false, error:"audio_too_large" });
         }
@@ -749,7 +745,6 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
       }
     }
 
-    // 3) 메타 JSON 저장 (기존 그대로)
     const meta = {
       id, ns,
       width: Number(req.body?.width || 0),
@@ -778,10 +773,15 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
   }
 });
 
+// [ADD] DELETE /auth/me
+app.delete("/auth/me", requireLogin, csrfProtection, handleAccountDelete);
+// [ADD] DELETE /api/users/me
+app.delete("/api/users/me", requireLogin, csrfProtection, handleAccountDelete);
+// [ADD] POST /auth/delete
+app.post("/auth/delete", requireLogin, csrfProtection, handleAccountDelete);
+
 /**
  * GET /api/audlab/list
- * 현재 로그인 사용자의 NS에서 최근 제출물 목록을 반환
- * 응답: { items: [{id,json,png}], ns }
  */
 app.get("/api/audlab/list", requireLogin, (req, res) => {
   try {
@@ -791,12 +791,9 @@ app.get("/api/audlab/list", requireLogin, (req, res) => {
 
     const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
     const ids = files.filter(f => f.endsWith(".json")).map(f => f.replace(/\.json$/,""));
-
-    // 최신순
     ids.sort((a,b) => (b > a ? 1 : -1));
 
     const items = ids.slice(0, 200).map(id => {
-      // 이미지/오디오 실제 확장자 찾기
       const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
       const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]);
       return {
@@ -834,33 +831,27 @@ app.get("/api/users/:id/public", requireLogin, (req, res) => {
   }
 });
 
-// 선택: /api/users/me → /auth/me와 동일하게 돌려주고 싶다면
 app.get("/api/users/me", requireLogin, (req, res) => meHandler(req, res));
-
 
 app.post(
   "/api/users/me/avatar",
   requireLogin,
   csrfProtection,
-  upload.any(), // avatar | file | image 등 어떤 필드명이 와도 받게
+  upload.any(),
   async (req, res) => {
     const uid = req.session?.uid;
     if (!uid) return res.status(401).json({ ok:false, msg:"로그인이 필요합니다." });
 
-    // 1) FormData 파일 찾기 (avatar, file, image, photo 우선)
     const files = Array.isArray(req.files) ? req.files : [];
     const picked =
       files.find(f => ["avatar","file","image","photo"].includes(f.fieldname)) ||
       files[0] || null;
 
     let buf = picked?.buffer || null;
-    // 파일 mimetype 화이트리스트
     if (picked && !isAllowedImageMime(picked.mimetype)) {
       return res.status(400).json({ ok:false, msg:"bad_image_mime" });
     }
 
-
-    // 2) 파일이 없으면 dataURL 폴백 (avatar/dataURL/dataUrl/avatarDataURL/thumbDataURL)
     if (!buf) {
       const raw =
         req.body?.avatar ||
@@ -880,7 +871,6 @@ app.post(
 
     if (!buf) return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
 
-    // 3) 정규화: 512x512 WebP
     let outBuf;
     try {
       outBuf = await sharp(buf)
@@ -904,14 +894,13 @@ app.post(
 
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
   setHeaders(res){
-    res.set("Accept-Ranges", "bytes");                  // ★ 오디오 시킹/부분요청
+    res.set("Accept-Ranges", "bytes");
     res.set("Cache-Control", "public, max-age=31536000, immutable");
   }
 }));
 
 // === Admin-only endpoints (audlab) ===
 const adminRouter = express.Router();
-const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
 try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
@@ -948,13 +937,10 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
     const items = files.slice(0, 200).map(f => {
       const id = f.replace(/\.json$/i, "");
 
-      // 이미지/오디오 확장자 탐색
       const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
       const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]);
 
-      // ── user 메타 구성 ─────────────────────────────────────────
       let user = null;
-      // 1) 메타(author) 우선
       try {
         const meta = JSON.parse(fs.readFileSync(path.join(dir, `${id}.json`), "utf8"));
         if (meta?.author) {
@@ -965,9 +951,8 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
             avatarUrl: meta.author.avatarUrl ?? null,
           };
         }
-      } catch { /* ignore broken meta */ }
+      } catch {}
 
-      // 2) 없으면 ns로 users 테이블 조회
       if (!user) {
         const nsNum = Number(ns);
         if (Number.isFinite(nsNum)) {
@@ -981,20 +966,18 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
                 avatarUrl: latestAvatarUrl?.(row.id) || null,
               };
             }
-          } catch { /* ignore */ }
+          } catch {}
         }
       }
 
-      // 3) 그래도 없으면 ns 자체를 id로 사용
       if (!user) user = { id: ns, email: null, displayName: null, avatarUrl: null };
-      // ────────────────────────────────────────────────────────
 
       return {
         id,
         json:  `/uploads/audlab/${safeNs}/${id}.json`,
         image: `/uploads/audlab/${safeNs}/${id}.${imgExt}`,
         ...(audExt ? { audio: `/uploads/audlab/${safeNs}/${id}.${audExt}` } : {}),
-        user, // ✅ 카드에서 item.user.id 사용 가능
+        user,
       };
     });
 
@@ -1004,15 +987,12 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
   }
 });
 
-
-// ✅ 모든 NS의 제출물을 한 번에 가져오는 엔드포인트
 adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
   try {
     const EXT_IMG = ["png","jpg","jpeg","webp","gif"];
     const EXT_AUD = ["webm","ogg","mp3","wav"];
     const EXT_MIME = { png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", webp:"image/webp", gif:"image/gif" };
 
-    // audlab 루트 아래 디렉토리(ns) 나열
     const nses = fs.readdirSync(AUDLAB_ROOT, { withFileTypes: true })
       .filter(d => d.isDirectory())
       .map(d => decodeURIComponent(d.name))
@@ -1023,7 +1003,6 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
     for (const ns of nses) {
       const dir = path.join(AUDLAB_ROOT, encodeURIComponent(ns));
 
-      // 이 NS의 *.json 들만 긁어오기 (_index.json 제외)
       const jsonFiles = fs.readdirSync(dir)
         .filter(f => f.endsWith(".json") && f !== "_index.json");
 
@@ -1031,15 +1010,12 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
         const id = jf.replace(/\.json$/i, "");
         const jPath = path.join(dir, jf);
 
-        // 메타 로드 (없거나 깨져 있어도 넘어감)
         let meta = null;
         try { meta = JSON.parse(fs.readFileSync(jPath, "utf8")); } catch {}
 
-        // 이미지/오디오 확장자 탐색
         const imgExt = findFirstExisting(dir, id, EXT_IMG) || meta?.ext || "png";
         const audExt = findFirstExisting(dir, id, EXT_AUD) || meta?.audioExt || null;
 
-        // user 메타 구성: 우선순위 (meta.author -> users 테이블 -> ns 폴백)
         let user = null;
         if (meta?.author?.id || meta?.author?.email || meta?.author?.displayName) {
           user = {
@@ -1049,7 +1025,6 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
             avatarUrl: meta.author.avatarUrl ?? null,
           };
         } else {
-          // ns가 숫자면 users에서 조회
           const nsNum = Number(ns);
           if (Number.isFinite(nsNum)) {
             try {
@@ -1064,17 +1039,15 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
               }
             } catch {}
           }
-          // 그래도 없으면 ns 자체를 id로 노출
           if (!user) user = { id: ns, email: null, displayName: null, avatarUrl: null };
         }
 
-        // createdAt 보정
         const createdAt = Number(meta?.createdAt ?? meta?.created_at ?? 0) ||
                           (() => { try { return Math.floor(fs.statSync(jPath).mtimeMs); } catch { return Date.now(); } })();
 
         items.push({
           id,
-          ns,                         // 어떤 유저의 파일인지 식별용
+          ns,
           createdAt,
           width: Number(meta?.width || 0),
           height: Number(meta?.height || 0),
@@ -1082,21 +1055,17 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
           caption: typeof meta?.caption === "string" ? meta.caption
                  : (typeof meta?.text === "string" ? meta.text : ""),
           bg: meta?.bg || meta?.bg_color || meta?.bgHex || null,
-          // 파일 URL들
           json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
           image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
           ...(audExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audExt}` } : {}),
-          // 카드에 찍을 user
           user,
-          // 편의
           mime: EXT_MIME[imgExt] || meta?.mime || null,
           audioExt: audExt || null,
-          accepted: !!meta?.accepted,   // 메타에 들어있는 경우 유지
+          accepted: !!meta?.accepted,
         });
       }
     }
 
-    // 최신순 정렬
     items.sort((a,b) => (b.createdAt - a.createdAt) || (a.id < b.id ? 1 : -1));
 
     return res.json({ ok: true, items });
@@ -1106,7 +1075,6 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
   }
 });
 
-// 단건 메타(선택)
 adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
   try {
     const ns = String(req.query.ns || "").trim();
@@ -1133,7 +1101,6 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
   }
 });
 
-// adminRouter 아래에 추가
 adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res) => {
   try {
     const ns = String(req.body?.ns || "").trim();
@@ -1141,29 +1108,28 @@ adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res
     if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
 
     const dir = path.join(AUDLAB_ROOT, nsSafe(ns));
-    const indexPath = path.join(dir, '_index.json'); // dir = path.join(AUDLAB_ROOT, nsSafe(ns))
+    const indexPath = path.join(dir, '_index.json');
 
     let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
     let hit = null;
 
-   // 인덱스에 없으면 단건 메타를 읽어 새로 추가
-   if (!hit) {
-     const jPath = path.join(dir, `${id}.json`);
-     if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
-     const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
-     hit = {
-       id,
-       ns,
-       label: j.label || "",
-       createdAt: j.createdAt || Date.now(),
-       width: j.width || 0,
-       height: j.height || 0,
-       ext: j.ext || "png",
-       mime: j.mime || "image/png",
-       author: j.author || null,
-     };
-     idx.unshift(hit); // 최신 앞으로
-   }
+    if (!hit) {
+      const jPath = path.join(dir, `${id}.json`);
+      if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
+      const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
+      hit = {
+        id,
+        ns,
+        label: j.label || "",
+        createdAt: j.createdAt || Date.now(),
+        width: j.width || 0,
+        height: j.height || 0,
+        ext: j.ext || "png",
+        mime: j.mime || "image/png",
+        author: j.author || null,
+      };
+      idx.unshift(hit);
+    }
 
     idx = idx.map(m => {
       if (String(m.id) === id) { hit = m; return { ...m, accepted:true, updatedAt:Date.now() }; }
@@ -1178,7 +1144,6 @@ adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res
 
 app.use("/api", adminRouter);
 
-// 로그인만 필요. 운영자 여부만 알려주는 경량 체크(버튼 노출용)
 app.get("/api/audlab/admin/bootstrap", requireLogin, (req, res) => {
   try {
     const row = getUserById(req.session.uid);
@@ -1198,7 +1163,7 @@ app.put ("/api/users/me/password",requireLogin, csrfProtection, applyPasswordCha
 app.post("/auth/profile", requireLogin, csrfProtection, applyNameChange);
 app.put ("/api/users/me", requireLogin, csrfProtection, applyNameChange);
 
-// 혼합 PATCH (일부 클라가 PATCH /auth/me 에서 name/password 둘 다 보냄)
+// 혼합 PATCH
 app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   const hasPw =
     typeof req.body?.currentPassword === "string" &&
@@ -1206,7 +1171,6 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   const hasName =
     typeof req.body?.displayName === "string" || typeof req.body?.name === "string";
 
-  // 비번 → 이름 순으로 처리
   if (!hasPw && !hasName) return res.status(400).json({ ok:false, error:"INVALID" });
 
   if (hasPw) {
@@ -1238,7 +1202,6 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   });
 });
 
-
 // me & ping
 function meHandler(req, res) {
   sendNoStore(res);
@@ -1247,7 +1210,6 @@ function meHandler(req, res) {
 
   const u = getUserById(req.session.uid);
 
-  // display_name 컬럼이 있어도/없어도 안전하게 읽기
   let displayName = null;
   try {
     const cols = db.prepare("PRAGMA table_info(users)").all().map(r => String(r.name));
@@ -1259,11 +1221,10 @@ function meHandler(req, res) {
 
   const avatarUrl = latestAvatarUrl(req.session.uid);
 
-  // ★ user 안과 top-level 둘 다 넣어 FE 호환 보장
   const payload = {
     ...base,
     user: u ? { id: u.id, email: u.email, displayName } : null,
-    ns: String(u?.email || "").toLowerCase(), // ✅ uid → email
+    ns: String(u?.email || "").toLowerCase(),
   };
   if (u) {
     payload.email = u.email;
@@ -1283,15 +1244,15 @@ app.get("/api/healthz", (_req, res) => {
 
 // ──────────────────────────────────────────────────────────
 app.get("/api/state", requireLogin, (req, res) => {
-  const ns = emailNS(req, null);                     // ✅ query.ns 무시
+  const ns = emailNS(req, null);
   const row = getUserState(req.session.uid, ns);
   if (!row) return res.json({ ok: true, state: null });
   return res.json({ ok: true, state: row.state, updatedAt: row.updatedAt });
 });
 
 app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
-  const email = emailNS(req, req.body?.ns);          // ✅ 강제 이메일
-  const state = req.body.state || req.body;          // 기존 호환
+  const email = emailNS(req, req.body?.ns);
+  const state = req.body.state || req.body;
   const updatedAt = Number(state?.updatedAt || Date.now());
   if (email) putStateByEmail(email, state, updatedAt);
   return res.json({ ok: true, ns: email });
@@ -1306,18 +1267,13 @@ app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────
-// 소셜/피드 라우터(있으면 자동 장착) — 업로드/블랍보다 '위'
+// 소셜/피드 라우터(있으면 자동 장착)
 // ──────────────────────────────────────────────────────────
-mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
-mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
+mountIfExists("./routes/gallery.public");
+mountIfExists("./routes/likes.routes");
 
-// ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
-
+// ===== 폴백 소셜 라우트 설치 =====
 (function installFallbackSocialRoutes(){
-  // [FIX] 중첩 라우터까지 탐색하는 안전한 라우트 존재 검사
-  // ──────────────────────────────────────────────────────────
-  // 안전한 라우트 존재 검사 (Express 4/5 호환, 중첩 라우터 OK)
-  // ──────────────────────────────────────────────────────────
   function hasRouteDeep(method, suffix) {
     try {
       method = String(method || '').toLowerCase();
@@ -1352,7 +1308,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     return false;
   }
 
-  // ───────────────── 테이블 보장 ─────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS item_likes (
       item_id   TEXT NOT NULL,
@@ -1361,7 +1316,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       PRIMARY KEY (item_id, user_id)
     );
 
-    /* 신규: 투표 테이블 (FE 스펙: label) */
     CREATE TABLE IF NOT EXISTS item_votes (
       item_id    TEXT NOT NULL,
       user_id    TEXT NOT NULL,
@@ -1373,7 +1327,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     CREATE INDEX IF NOT EXISTS idx_item_votes_label ON item_votes(label);
   `);
 
-  // ───────────────── Votes 헬퍼 ─────────────────
   const VOTE_LABELS = new Set(["thump","miro","whee","track","echo","portal"]);
   const isVoteLabel = (s) => VOTE_LABELS.has(String(s || "").trim());
   const zeroCounts  = () => { const o={}; VOTE_LABELS.forEach(k=>o[k]=0); return o; };
@@ -1400,7 +1353,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     if (!ownerNs) {
       try {
         const row = db.prepare('SELECT owner_ns, author_email FROM items WHERE id=?').get(itemId) || {};
-        ownerNs = resolvePushNS(row.author_email || row.owner_ns || null); // 이메일 NS로 통일
+        ownerNs = resolvePushNS(row.author_email || row.owner_ns || null);
         if (ownerNs) ITEM_OWNER_NS.set(String(itemId), ownerNs);
       } catch {}
     }
@@ -1411,16 +1364,13 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     return counts;
   }
 
-  // =========================================================
-  // 아이템 좋아요
-  // =========================================================
   if (!hasRouteDeep('put', '/items/:id/like')) {
     app.put('/api/items/:id/like', requireLogin, csrfProtection, (req, res) => {
       try {
         const id  = String(req.params.id);
         const uid = req.session.uid;
         const ns  = getNS(req);
-        const info = db.prepare(
+        db.prepare(
           'INSERT OR IGNORE INTO item_likes(item_id, user_id, created_at) VALUES(?,?,?)'
         ).run(id, uid, Date.now());
         const n = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id).n;
@@ -1469,16 +1419,12 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     });
   }
 
-  // =========================================================
-  // 공개 갤러리 (여러 ns 통합) — 하드닝 버전
-  // =========================================================
   if (!hasRouteDeep('get', '/gallery/public') || process.env.FORCE_FALLBACK_PUBLIC === '1') {
     app.get('/api/gallery/public', requireLogin, (req, res) => {
       res.set('Cache-Control', 'no-store');
       try {
         const limit = Math.min(Number(req.query.limit) || 12, 60);
 
-        // after/cursor 둘 다 허용
         const afterParam = String(req.query.after || req.query.cursor || '');
         const [aTsStr, aId = ''] = afterParam ? afterParam.split('-') : [];
         const afterTs = Number(aTsStr || 0);
@@ -1486,8 +1432,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const nsFilter    = String(req.query.ns || '').trim().toLowerCase();
         const labelFilter = String(req.query.label || '').trim();
 
-        const SKIP_DIRS = new Set(['avatars']); // 아바타 폴더 제외
-        // 1) ns 디렉토리 나열
+        const SKIP_DIRS = new Set(['avatars']);
         let nss = [];
         try {
           nss = fs.readdirSync(UPLOAD_ROOT)
@@ -1496,7 +1441,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
                 if (SKIP_DIRS.has(d)) return false;
                 const p = path.join(UPLOAD_ROOT, d);
                 if (!fs.lstatSync(p).isDirectory()) return false;
-                // 이메일 NS만 허용
                 return isEmail(decodeURIComponent(d));
               } catch { return false; }
             })
@@ -1506,7 +1450,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
         const EXT_MIME = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp', gif:'image/gif' };
 
-        // 2) 각 ns의 인덱스 취합(+ 인덱스 없으면 파일 스캔 폴백)
         const all = [];
         for (const ns of nss) {
           const dir = dirForNS(ns);
@@ -1516,7 +1459,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           try { idx = JSON.parse(fs.readFileSync(indexPath, 'utf8')); } catch {}
 
           if (!Array.isArray(idx) || idx.length === 0) {
-            // ▶ 폴백: 이미지 파일 스캔으로 메타 생성
             try {
               const files = fs.readdirSync(dir).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f));
               idx = files.map(f => {
@@ -1549,7 +1491,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
               caption: typeof m?.caption === 'string' ? m.caption
                     : (typeof m?.text === 'string' ? m.text : ''),
               bg: m?.bg || m?.bg_color || m?.bgHex || null,
-              // ⬅ 추가: 업로드 당시 저장해둔 작성자 메타를 리스트에도 싣기
               author: (m?.author ? {
                 id: m.author.id ?? null,
                 displayName: m.author.displayName ?? null,
@@ -1560,14 +1501,12 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           }
         }
 
-        // 3) label 필터
         if (labelFilter) {
           for (let i = all.length - 1; i >= 0; i--) {
             if (String(all[i].label || '') !== labelFilter) all.splice(i, 1);
           }
         }
 
-        // 4) 정렬 + after 커서
         all.sort((a,b) => (b.created_at - a.created_at) || (a.id < b.id ? 1 : -1));
         if (afterTs) {
           const cid = String(aId);
@@ -1577,8 +1516,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if (cut >= 0) all.splice(0, cut + 1);
         }
         const slice = all.slice(0, limit);
-
-        // 5) DB 카운트/liked 보강
 
         const authors = new Set();
         for (const it of slice) {
@@ -1601,7 +1538,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         }
 
         for (const it of slice) {
-          // 1) 업로드 메타에 author.email 이 있으면 '작성자'를 최우선으로 사용
           const authorEmail = it?.author?.email;
           if (authorEmail && typeof getUserByEmail === "function") {
             const row = getUserByEmail(String(authorEmail).toLowerCase());
@@ -1612,13 +1548,12 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
               avatarUrl: null
             };
           } else {
-            // 2) 없으면 기존 오너 ns 로부터 유저 복원
             const key = Number.isFinite(Number(it.ns)) ? `id:${Number(it.ns)}` : `email:${String(it.ns).toLowerCase()}`;
             const row = authorMap.get(key);
             it.user = row
-              ? authorProfileShape({               // ← 공개용이 아니라 '작성자' shape 사용
+              ? authorProfileShape({
                   id: row.id,
-                  email: row.email,                 // row.email 은 publicUserShape에서 마스킹일 수 있어 null이면 it.ns 사용
+                  email: row.email,
                   displayName: row.displayName,
                   avatarUrl: row.avatarUrl
                 })
@@ -1630,14 +1565,11 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
                 };
           }
 
-          // 3) 메타 보강(표시명/아바타)
           if ((!it.user.displayName || it.user.displayName === null) && it.author?.displayName) it.user.displayName = it.author.displayName;
           if ((!it.user.avatarUrl   || it.user.avatarUrl   === null) && it.author?.avatarUrl)   it.user.avatarUrl   = it.author.avatarUrl;
 
-          // 4) mine 플래그
           it.mine = isMineEmail(req, it.ns);
 
-          // 5) 알림 라우팅용: id -> owner ns 맵 업데이트
           if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
           globalThis.ITEM_OWNER_NS.set(String(it.id), String(it.ns));
         }
@@ -1653,10 +1585,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     });
   }
 
-  // =========================================================
-  // Votes (poll) — FE가 시도하는 모든 경로 지원
-  // =========================================================
-  // GET /api/items/:id/votes
   if (!hasRouteDeep('get', '/items/:id/votes')) {
     app.get('/api/items/:id/votes', requireLogin, (req, res) => {
       try{
@@ -1666,7 +1594,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       } catch { res.status(500).json({ ok:false }); }
     });
   }
-  // GET /api/votes?item=ID
   if (!hasRouteDeep('get', '/votes')) {
     app.get('/api/votes', requireLogin, (req, res) => {
       try{
@@ -1677,7 +1604,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       } catch { res.status(500).json({ ok:false }); }
     });
   }
-  // PUT /api/items/:id/vote?label=LB  (or {label} in body)
   if (!hasRouteDeep('put', '/items/:id/vote')) {
     app.put('/api/items/:id/vote', requireLogin, csrfProtection, (req, res) => {
       try{
@@ -1686,7 +1612,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const ns  = getNS(req);
         const label = String(req.query.label || req.body?.label || req.body?.choice || '').trim();
         if (!isVoteLabel(label)) return res.status(400).json({ ok:false, error:'bad-label' });
-        const prev = db.prepare('SELECT label FROM item_votes WHERE item_id=? AND user_id=?').get(id, uid)?.label || null;
         db.prepare(`
           INSERT INTO item_votes(item_id,user_id,label,created_at)
           VALUES(?,?,?,?)
@@ -1696,11 +1621,9 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
         const counts = emitVoteUpdate(id, ns);
         res.json({ ok:true, id, counts, my: label });
-        // ★ 라벨이 실제로 바뀐 경우에만, 소유자에게 한 번만 푸시
       } catch { res.status(500).json({ ok:false }); }
     });
   }
-  // POST /api/items/:id/votes {label}
   if (!hasRouteDeep('post', '/items/:id/votes')) {
     app.post('/api/items/:id/votes', requireLogin, csrfProtection, (req, res) => {
       try{
@@ -1722,7 +1645,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       } catch { res.status(500).json({ ok:false }); }
     });
   }
-  // POST /api/votes { item_id, label }
   if (!hasRouteDeep('post', '/votes')) {
     app.post('/api/votes', requireLogin, csrfProtection, (req, res) => {
       try{
@@ -1745,7 +1667,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       } catch { res.status(500).json({ ok:false }); }
     });
   }
-  // DELETE /api/items/:id/vote
   if (!hasRouteDeep('delete', '/items/:id/vote')) {
     app.delete('/api/items/:id/vote', requireLogin, csrfProtection, (req, res) => {
       try{
@@ -1758,7 +1679,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       } catch { res.status(500).json({ ok:false }); }
     });
   }
-  // DELETE /api/items/:id/votes
   if (!hasRouteDeep('delete', '/items/:id/votes')) {
     app.delete('/api/items/:id/votes', requireLogin, csrfProtection, (req, res) => {
       try{
@@ -1771,7 +1691,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
       } catch { res.status(500).json({ ok:false }); }
     });
   }
-  // DELETE /api/votes?item=ID
   if (!hasRouteDeep('delete', '/votes')) {
     app.delete('/api/votes', requireLogin, csrfProtection, (req, res) => {
       try{
@@ -1786,9 +1705,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
     });
   }
 
-  // =========================================================
-  // 단일 아이템 메타 조회
-  // =========================================================
   if (process.env.FORCE_FALLBACK_ITEMS === '1' || !hasRouteDeep('get', '/items/:id')) {
     app.get('/api/items/:id', requireLogin, (req, res) => {
       try {
@@ -1796,39 +1712,34 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const id = String(req.params.id || '');
         if (!id) return res.status(400).json({ ok: false, error: 'bad-id' });
 
-        // ✨ 후보 ns: 요청 ns, 내 uid, 내 email 모두
-        const candidates = getMyNamespaces(req, preferNs); // 이미 파일에 선언된 헬퍼
+        const candidates = getMyNamespaces(req, preferNs);
 
-        // 1) 메타 찾기 (_index.json)
         let meta = null;
         let foundNs = null;
         for (const ns of candidates) {
           if (!ns) continue;
           try {
-              const indexPath = path.join(dirForNS(ns), '_index.json');
-              const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            const indexPath = path.join(dirForNS(ns), '_index.json');
+            const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
             if (Array.isArray(idx)) {
               const hit = idx.find(m => String(m.id) === id);
               if (hit) { meta = hit; foundNs = ns; break; }
             }
-          } catch {} // 없을 수 있음
+          } catch {}
         }
 
-        // 2) 파일 확장자/타입 찾기 (메타 없거나 ext 없을 때도 안전)
         const EXT_TO_MIME = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp', gif:'image/gif' };
         const tryExts = [];
         if (meta?.ext) tryExts.push(String(meta.ext).toLowerCase());
         tryExts.push('png','jpg','jpeg','webp','gif');
 
         let fileExt = null, fileMime = null, fileNs = foundNs;
-        // 먼저 foundNs에서 시도
         if (fileNs) {
-          const base = path.join(dirForNS(ns), id);
+          const base = path.join(dirForNS(fileNs), id); // ← FIX: ns → fileNs
           for (const e of [...new Set(tryExts)]) {
             if (fs.existsSync(`${base}.${e}`)) { fileExt = e; fileMime = EXT_TO_MIME[e]; break; }
           }
         }
-        // 거기서 못 찾으면 후보 ns 전부 스캔
         if (!fileExt) {
           for (const ns of candidates) {
             if (!ns) continue;
@@ -1840,7 +1751,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           }
         }
 
-        // 3) 기본 필드 조립 (meta가 없어도 안전)
         const created_at = Number(meta?.createdAt ?? meta?.created_at ?? 0) || null;
         const out = {
           id,
@@ -1857,7 +1767,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           mime: fileMime || meta?.mime || (fileExt ? EXT_TO_MIME[fileExt] : null),
         };
 
-        // 4) 좋아요/댓글 카운트 (에러 무시)
         try {
           const uid = req.session?.uid || '';
           const likeCnt = db.prepare('SELECT COUNT(*) n FROM item_likes WHERE item_id=?').get(id)?.n || 0;
@@ -1865,15 +1774,12 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           out.likes = likeCnt; out.liked = liked;
         } catch {}
 
-        // 5) owner 정보 + mine 플래그 (+ meta.author 보강)
         try {
-          // nsUsed: 파일이 위치한 오너 네임스페이스
           const nsUsed   = out.ns || preferNs;
           const myns     = String(req.session?.uid || '').toLowerCase();
           const ownerId  = Number(nsUsed);
           const ownerRow = Number.isFinite(ownerId) ? getUserById(ownerId) : null;
 
-          // 1) 메타에 author.email 이 있으면 '작성자' 우선
           const authorEmail = meta?.author?.email;
           if (authorEmail && typeof getUserByEmail === "function") {
             const row = getUserByEmail(String(authorEmail).toLowerCase());
@@ -1884,7 +1790,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
               avatarUrl: null
             };
           } else {
-            // 2) 없으면 오너 ns 기준으로 작성자 추정
             if (ownerRow) {
               out.user = authorProfileShape(ownerRow);
             } else {
@@ -1892,17 +1797,13 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
             }
           }
 
-          // 3) 메타 보강(표시명/아바타)
           if ((!out.user.displayName || out.user.displayName === null) && meta?.author?.displayName) out.user.displayName = meta.author.displayName;
           if ((!out.user.avatarUrl   || out.user.avatarUrl   === null) && meta?.author?.avatarUrl)   out.user.avatarUrl   = meta.author.avatarUrl;
 
-
-          // ★ 최종 폴백: 이메일 local-part(예: finelee03)
           if (!out.user.displayName && ownerRow?.email) {
             out.user.displayName = String(ownerRow.email).split("@")[0];
           }
 
-          // author 필드 자체도 없으면 최소 셋업(디버깅/FE 호환)
           if (!out.author && ownerRow) {
             out.author = {
               id: ownerRow.id ?? null,
@@ -1912,10 +1813,8 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
             };
           }
 
-
           out.mine = isMineEmail(req, nsUsed);
 
-          // 디버깅/표시용 원본 author도 같이 노출(선택)
           if (meta?.author) {
             out.author = {
               id: meta.author.id ?? null,
@@ -1924,7 +1823,6 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
               email: meta.author.email ?? null,
             };
           }
-          // ★ 최종 백필: author가 없거나(author.displayName이 비었으면) user로 보강
           if (!out.author) out.author = {};
           if (!out.author.id && out.user?.id) out.author.id = out.user.id;
           if (!out.author.displayName && out.user?.displayName) out.author.displayName = out.user.displayName;
@@ -1933,8 +1831,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
         } catch {}
 
-        // 1) 오너 NS 기준으로 owner row 조회
-        const ownerNs = out.ns; // (파일 경로에서 추출된 ns 혹은 기존 계산값)
+        const ownerNs = out.ns;
         let ownerRow = null;
         if (Number.isFinite(Number(ownerNs))) {
           ownerRow = getUserById(Number(ownerNs));
@@ -1942,34 +1839,26 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           ownerRow = getUserByEmail(String(ownerNs).toLowerCase());
         }
 
-        // 2) 명시 필드 추가
-        out.owner = { ns: ownerNs };                               // 오너 네임스페이스
+        out.owner = { ns: ownerNs };
         out.authorProfile = ownerRow ? authorProfileShape(ownerRow) : null;
 
-        // 3) FE 호환: user는 '작성자'로 통일
         if (out.authorProfile) out.user = out.authorProfile;
 
-        // 4) 업로드 메타(author)로 보강
         if (!out.user?.displayName && out.author?.displayName) out.user.displayName = out.author.displayName;
         if (!out.user?.avatarUrl   && out.author?.avatarUrl)   out.user.avatarUrl   = out.author.avatarUrl;
 
-        // 5) 알림 라우팅용 맵 갱신
         if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
         globalThis.ITEM_OWNER_NS.set(String(out.id), ownerNs);
-
 
         res.set('Cache-Control', 'no-store');
         return res.json({ ok: true, ...out, item: out });
       } catch (e) {
-        // 원인 확인 쉬우라고 에러 메시지 로그
         console.log('[GET /api/items/:id] fatal:', e?.stack || e);
         return res.status(500).json({ ok: false, error: 'item-read-failed' });
       }
     });
   }
-  
 })();
-
 
 // ──────────────────────────────────────────────────────────
 // 접근 정책: 보호된 페이지/엔드포인트
@@ -1991,7 +1880,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
   ensureAuth, csrfProtection, upload.single("file"),
   (req, res) => {
     try {
-      const ns = emailNS(req, null);       // ✅ 이메일 NS
+      const ns = emailNS(req, null);
       const {
         id = `g_${Date.now()}`, label = "", createdAt = Date.now(),
         width = 0, height = 0, thumbDataURL = "",
@@ -2000,12 +1889,10 @@ app.post(["/api/gallery/upload", "/api/gallery"],
       const dir = path.join(UPLOAD_ROOT, encodeURIComponent(ns));
       ensureDir(dir);
 
-      // 1) 파일 소스 결정 (file 우선, 없으면 thumbDataURL 디코드)
       let fileBuf = req.file?.buffer || null;
       let ext = "png";
       let mime = "image/png";
 
-      // (A) multer 파일도 이미지 화이트리스트 체크
       if (req.file && !isAllowedImageMime(req.file.mimetype)) {
         return res.status(400).json({ ok:false, error:"bad_image_mime" });
       }
@@ -2016,7 +1903,6 @@ app.post(["/api/gallery/upload", "/api/gallery"],
           if (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime)) {
             return res.status(400).json({ ok:false, error:"bad_image_mime" });
          }
-          // dataURL 경로 용량 가드 (예: 8MB)
           if (decoded.buf.length > 8 * 1024 * 1024) {
             return res.status(413).json({ ok:false, error:"image_too_large" });
           }
@@ -2031,7 +1917,6 @@ app.post(["/api/gallery/upload", "/api/gallery"],
       if (!outPath.startsWith(dir + path.sep)) return res.status(400).json({ ok:false, error:"bad-path" });
       fs.writeFileSync(outPath, fileBuf);
 
-      // 메타 저장
       const meta = {
         id, label,
         createdAt: Number(createdAt) || Date.now(),
@@ -2040,7 +1925,6 @@ app.post(["/api/gallery/upload", "/api/gallery"],
         ns, ext, mime,
       };
 
-      // 작성자 메타 수집(기존 그대로)
       {
         const b = req.body || {};
         const fromUser = (() => { try { return typeof b.user === 'string' ? JSON.parse(b.user) : (b.user || null); } catch { return null; } })();
@@ -2049,12 +1933,10 @@ app.post(["/api/gallery/upload", "/api/gallery"],
           displayName: fromUser?.displayName || fromUser?.name || null,
           handle:      null,
           avatarUrl:   fromUser?.avatarUrl || null,
-          email:       fromUser?.email || ns, // 최소 이메일 보장
+          email:       fromUser?.email || ns,
         };
         if (author.id || author.displayName || author.avatarUrl || author.email) meta.author = author;
       }
-
-      // caption/bg 저장(기존 그대로)
 
       const indexPath = path.join(dirForNS(ns), '_index.json');
       let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
@@ -2071,15 +1953,13 @@ app.post(["/api/gallery/upload", "/api/gallery"],
   }
 );
 
-/* 5) gallery.public / items/:id 등에서 mine 판정: uid → email */
+/* 5) gallery.public / items/:id 등에서 mine 판정 */
 function isMineEmail(req, candidateNs) {
   const meEmail = emailNS(req, null);
   return meEmail && String(candidateNs||'').toLowerCase() === meEmail;
 }
 
-// ====== item 삭제/조회 보강 헬퍼 & 라우트 (업로드 뒤에, 블랍 라우트 전에) ======
-
-// JSON 원자적 저장(임시파일 → rename)
+// ====== item 삭제/조회 보강 헬퍼 & 라우트 ======
 function writeJsonAtomic(filePath, dataObj) {
   try {
     const dir = path.dirname(filePath);
@@ -2090,28 +1970,23 @@ function writeJsonAtomic(filePath, dataObj) {
   } catch { return false; }
 }
 
-// 내 계정에서 사용할 수 있는 모든 후보 NS (요청 ns, 내 uid, 내 email)
 function getMyNamespaces(req, preferNs) {
   const emailNs = emailNS(req, null);
   const pref    = String(preferNs || '').toLowerCase();
   return [...new Set([emailNs, pref].filter(isEmail))];
 }
 
-// index/파일을 안전하게 삭제 (index에 없더라도 파일만 있으면 삭제 성공으로 간주)
 function removeItemFileAndIndexIn(ns, id) {
   try {
     const dir = dirForNS(ns);
     const indexPath = path.join(dirForNS(ns), '_index.json');
 
-    // 1) index 로드 (없으면 빈 배열)
     let idx = [];
     try { idx = JSON.parse(fs.readFileSync(indexPath, 'utf8')); } catch {}
 
-    // 2) index에서 제거 시도
     const before = idx.length;
     idx = Array.isArray(idx) ? idx.filter(m => String(m.id) !== String(id)) : [];
 
-    // 3) 파일 삭제 (하나라도 삭제되면 ok)
     let anyFileDeleted = false;
     for (const ext of ['png','jpg','jpeg','webp','gif']) {
       const p = path.join(dir, `${id}.${ext}`);
@@ -2120,15 +1995,11 @@ function removeItemFileAndIndexIn(ns, id) {
       }
     }
 
-    // 4) index가 바뀌었으면 원자적으로 저장
     if (before !== idx.length) writeJsonAtomic(indexPath, idx);
-
-    // index에서 빠졌거나, 파일을 하나라도 지웠으면 ‘삭제 성공’으로 처리
     return (before !== idx.length) || anyFileDeleted;
   } catch { return false; }
 }
 
-// 전체 후보 NS를 돌며 실제로 지워진 곳 반환
 function removeItemEverywhere(req, id) {
   const candidates = getMyNamespaces(req, getNS(req));
   for (const ns of candidates) {
@@ -2138,7 +2009,6 @@ function removeItemEverywhere(req, id) {
   return null;
 }
 
-// 삭제 시 DB 고아 레코드 정리
 function purgeItemDb(id) {
   try {
     db.prepare('DELETE FROM item_likes WHERE item_id=?').run(id);
@@ -2146,18 +2016,16 @@ function purgeItemDb(id) {
   } catch {}
 }
 
-// DELETE /api/items/:id
 app.delete('/api/items/:id', requireLogin, csrfProtection, (req, res) => {
   const id = String(req.params.id || '');
   if (!id) return res.status(400).json({ ok:false, error:'bad-id' });
 
-  // 클라이언트가 명시적으로 ns를 보낸 경우에만 권한체크
   const sentNs = String(req.body?.ns || req.query?.ns || '').trim();
   if (sentNs && !ensureOwnerNs(req, sentNs)) {
     return res.status(403).json({ ok:false, error:'forbidden' });
   }
 
-  const removedNs = removeItemEverywhere(req, id); // 후보(ns, uid, email) 순회 삭제
+  const removedNs = removeItemEverywhere(req, id);
   if (!removedNs) return res.status(404).json({ ok:false, error:'not-found' });
 
   purgeItemDb(id);
@@ -2166,7 +2034,6 @@ app.delete('/api/items/:id', requireLogin, csrfProtection, (req, res) => {
   return res.json({ ok:true, id, ns: removedNs });
 });
 
-// POST /api/items/:id/delete  (폴백)
 app.post('/api/items/:id/delete', requireLogin, csrfProtection, (req, res) => {
   const id = String(req.params.id || '');
   if (!id) return res.status(400).json({ ok:false, error:'bad-id' });
@@ -2185,7 +2052,6 @@ app.post('/api/items/:id/delete', requireLogin, csrfProtection, (req, res) => {
   return res.json({ ok:true, id, ns: removedNs });
 });
 
-// POST /api/delete?item=ID  (최후 폴백)
 app.post('/api/delete', requireLogin, csrfProtection, (req, res) => {
   const id = String(req.query.item || req.body?.item || '');
   if (!id) return res.status(400).json({ ok:false, error:'bad-id' });
@@ -2204,12 +2070,10 @@ app.post('/api/delete', requireLogin, csrfProtection, (req, res) => {
   return res.json({ ok:true, id, ns: removedNs });
 });
 
-
-// 권한 체크: 요청 ns가 내 uid/email 변형 중 하나와 일치해야 함
 function ensureOwnerNs(req, ns) {
-  const email = emailNS(req, null);                      // 내 이메일 NS
-  const want  = String(ns || '').trim().toLowerCase();   // 요청이 들고온 ns
-  return !!email && want === email;                      // 이메일만 허용
+  const email = emailNS(req, null);
+  const want  = String(ns || '').trim().toLowerCase();
+  return !!email && want === email;
 }
 
 // ── 이미지 blob (ns 힌트가 없더라도 전 ns에서 탐색)
@@ -2217,7 +2081,7 @@ function ensureOwnerNs(req, ns) {
   const EXT_TO_MIME = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp', gif:'image/gif' };
   const exts = ['png','jpg','jpeg','webp','gif'];
 
-  function findBlobPath(id, preferNs, uid) {
+  function findBlobPath(id, preferNs) { // ← FIX: uid 제거
     const dirs = new Set();
     if (preferNs) dirs.add(dirForNS(preferNs));
     try {
@@ -2226,7 +2090,7 @@ function ensureOwnerNs(req, ns) {
         try {
           if (d === 'avatars') continue;
           if (!fs.lstatSync(p).isDirectory()) continue;
-          if (!isEmail(decodeURIComponent(d))) continue; // 이메일 NS만
+          if (!isEmail(decodeURIComponent(d))) continue;
           dirs.add(p);
         } catch {}
       }
@@ -2246,7 +2110,6 @@ function ensureOwnerNs(req, ns) {
       if (!id) return res.status(400).json({ ok:false, error:'bad-id' });
       const preferNs = String(req.query.ns || '');
 
-      // 인덱스에 등록된 확장자 우선(있으면 제일 먼저 확인)
       let hintExts = [];
       try {
         const ns = preferNs || emailNS(req, null);
@@ -2269,7 +2132,7 @@ function ensureOwnerNs(req, ns) {
           })()
         : null;
 
-      const found = foundByIndex || findBlobPath(id, preferNs, uid);
+      const found = foundByIndex || findBlobPath(id, preferNs); // ← FIX: uid 제거
       if (!found) return res.status(404).json({ ok:false, error:'not-found' });
 
       res.setHeader('Content-Type', found.mime);
@@ -2295,13 +2158,11 @@ app.get("/", (_, res) => res.sendFile(path.join(PUBLIC_DIR, "home.html")));
 io.engine.use(sessionMiddleware);
 io.on("connection", (sock) => {
   sock.on("subscribe", (payload = {}) => {
-    // 1) 라벨 조인(기존 유지)
     const labels = Array.isArray(payload.labels)
       ? payload.labels
       : (payload.label ? [payload.label] : []);
     for (const lb of labels) if (typeof lb === "string" && lb) sock.join(`label:${lb}`);
 
-    // 2) 내 NS / 감시 NS 조인
     const ns = String(payload.ns || "").toLowerCase();
     if (ns) sock.join(`ns:${ns}`);
     const watch = Array.isArray(payload.watch) ? payload.watch : [];
@@ -2310,13 +2171,12 @@ io.on("connection", (sock) => {
       if (wn) sock.join(`ns:${wn}`);
     }
 
-    // 3) 아이템 조인 + ★소유자 NS 학습
     const items = Array.isArray(payload.items) ? payload.items : [];
     for (const it of items) {
       const id = String(it || "");
       if (!id) continue;
       sock.join(`item:${id}`);
-      if (ns) ITEM_OWNER_NS.set(id, ns); // 핵심: “이 아이템은 ns 소유”
+      if (ns) ITEM_OWNER_NS.set(id, ns);
     }
   });
 
@@ -2331,7 +2191,6 @@ io.on("connection", (sock) => {
       const id = String(it || "");
       if (!id) continue;
       sock.leave(`item:${id}`);
-      // 캐시는 유지(다른 소켓이 여전히 감시 중일 수 있음)
     }
   });
 });
@@ -2363,17 +2222,15 @@ server.listen(PORT, () => {
   console.log(`listening: http://localhost:${PORT}`);
   if (!PROD) printRoutesSafe();
 
-  // [ADD] 관리자 계정 시드: 부팅 시 항상 확인/생성
   (async () => {
     try {
-      await seedAdminUsers(); // 왜: 관리자가 없으면 생성해 me/admin 기능이 즉시 동작
+      await seedAdminUsers();
       console.log("[admin] seed done");
     } catch (e) {
       console.warn("[admin] seed at boot failed:", e?.message || e);
     }
   })();
 
-  // BLE 브리지 초기화(실패해도 서버는 계속)
   try {
     if (typeof startBleBridge === "function") {
       startBleBridge(io, { companyIdLE: 0xFFFF, log: true });
