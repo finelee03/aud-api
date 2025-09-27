@@ -24,7 +24,7 @@ const DATA_DIR =
   process.env.RENDER_DISK_PATH ||          // (선택) 직접 주입한 디스크 경로
   (fs.existsSync("/var/data") ? "/var/data" : "/tmp"); // Render 디스크 없으면 /tmp
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-
+const EFFECTIVE_DATA_DIR = DATA_DIR;
 // === Admin config & seeding ===
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "finelee03@naver.com")
   .split(",").map(s => String(s || "").trim().toLowerCase()).filter(Boolean);
@@ -484,16 +484,35 @@ const SqliteStore = SqliteStoreFactory(session);
 const SESSION_DB_PATH =
   process.env.SESSION_DB_PATH ||
   path.join(DATA_DIR, "sessions.sqlite");
+// ── 세션 DB 파일/디렉토리 보정 ─────────────────────────────
+try {
+  // 디렉토리 퍼미션 보정 (최소 700)
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  try {
+    const st = fs.statSync(DATA_DIR);
+    const want = 0o700;
+    if ((st.mode & 0o777) !== want) fs.chmodSync(DATA_DIR, want);
+  } catch {}
+
+  // 파일이 없으면 생성(0600), 있으면 퍼미션 보정
+  if (!fs.existsSync(SESSION_DB_PATH)) {
+    const fd = fs.openSync(SESSION_DB_PATH, 'w', 0o600);
+    fs.closeSync(fd);
+  } else {
+    try { fs.chmodSync(SESSION_DB_PATH, 0o600); } catch {}
+  }
+} catch (e) {
+  console.warn('[session.sqlite] preflight failed:', e?.message || e);
+}
+
 const sessionDB = new Sqlite(SESSION_DB_PATH);
 try {
-  // Render 영구디스크(NFS)에서 WAL은 충돌 빈도가 높음 → DELETE 모드 권장
+  // Render NFS에서는 WAL이 깨질 수 있음 → DELETE 모드로 고정
   sessionDB.pragma('journal_mode = DELETE');
-  // 잠금 경합시 5초 대기
   sessionDB.pragma('busy_timeout = 5000');
-  // fsync 부담 낮추기(안정성/속도 균형)
   sessionDB.pragma('synchronous = NORMAL');
 } catch (e) {
-  console.warn('[session.sqlite] pragma set failed:', e?.message || e);
+  console.warn('[session.sqlite] pragma failed:', e?.message || e);
 }
 const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;        // 7일(ms)
 const MAX_AGE_SEC = Math.floor(MAX_AGE_MS / 1000); // 7일(sec)
