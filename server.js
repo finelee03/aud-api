@@ -2363,6 +2363,16 @@ server.listen(PORT, () => {
   console.log(`listening: http://localhost:${PORT}`);
   if (!PROD) printRoutesSafe();
 
+  // [ADD] 관리자 계정 시드: 부팅 시 항상 확인/생성
+  (async () => {
+    try {
+      await seedAdminUsers(); // 왜: 관리자가 없으면 생성해 me/admin 기능이 즉시 동작
+      console.log("[admin] seed done");
+    } catch (e) {
+      console.warn("[admin] seed at boot failed:", e?.message || e);
+    }
+  })();
+
   // BLE 브리지 초기화(실패해도 서버는 계속)
   try {
     if (typeof startBleBridge === "function") {
