@@ -792,6 +792,16 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
 
 app.use("/api", adminRouter);
 
+// 로그인만 필요. 운영자 여부만 알려주는 경량 체크(버튼 노출용)
+app.get("/api/audlab/admin/bootstrap", requireLogin, (req, res) => {
+  try {
+    const row = getUserById(req.session.uid);
+    const admin = !!(row && isAdminEmail(row.email));
+    res.json({ ok: true, admin, email: row?.email || null });
+  } catch {
+    res.status(500).json({ ok:false });
+  }
+});
 
 // 비밀번호 변경
 app.post("/auth/password",        requireLogin, csrfProtection, applyPasswordChange);
@@ -915,15 +925,14 @@ mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gal
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
 
 // audlab REST (submit/list) — routes are absolute (/api/audlab/*), so mount at root
+// audlab REST (submit/list) — /api 아래로만 마운트 (중복/경로 혼동 방지)
 try {
   const audlabRouter = require(path.join(__dirname, "audlab-router"));
-  app.use("/", audlabRouter);
-  console.log("[router] mounted audlab-router at /");
+  app.use("/api", audlabRouter);
+  console.log("[router] mounted audlab-router at /api");
 } catch (e) {
   console.log("[router] audlab-router not found:", e?.message || e);
 }
-
-mountIfExists(path.join(__dirname, "audlab-router"), "/"); // mounts at /api
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
 
