@@ -57,6 +57,14 @@ const { startBleBridge } = require("./ble-bridge");
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
+function findFirstExisting(dir, id, exts) {
+  for (const e of exts) {
+    const p = path.join(dir, `${id}.${e}`);
+    if (fs.existsSync(p)) return e;
+  }
+  return null;
+}
+
 // ──────────────────────────────────────────────────────────
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
@@ -215,17 +223,39 @@ process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 function ensureDir(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
 
-// dataURL(base64) → Buffer 디코더
+// dataURL(base64) → Buffer 디코더 (image + audio 지원)
 function decodeDataURL(dataURL) {
-  const m = String(dataURL || "").match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+  const m = String(dataURL || "").match(/^data:([a-z0-9.+/-]+);base64,(.+)$/i);
   if (!m) return null;
-  const mime = m[1];
-  const buf = Buffer.from(m[2], "base64");
-  let ext = "png";
-  if (/jpe?g/i.test(mime)) ext = "jpg";
-  else if (/webp/i.test(mime)) ext = "webp";
-  else if (/gif/i.test(mime)) ext = "gif";
-  else if (/png/i.test(mime)) ext = "png";
+  const mime = m[1].toLowerCase();
+  const buf  = Buffer.from(m[2], "base64");
+
+  // mime → 확장자 매핑
+  const map = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+
+    // 오디오
+    "audio/webm;codecs=opus": "webm",
+    "audio/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/ogg;codecs=opus": "ogg",
+    "audio/mpeg": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+  };
+
+  // 불특정 파라미터가 붙어도 base mime으로 매핑
+  const baseMime = mime.split(";")[0];
+  const ext =
+    map[mime] || map[baseMime] ||
+    (baseMime.startsWith("image/") ? baseMime.split("/")[1] : null) ||
+    (baseMime.startsWith("audio/") ? baseMime.split("/")[1] : null) ||
+    "bin";
+
   return { mime, buf, ext };
 }
 
@@ -292,6 +322,7 @@ app.use(
 );
 
 app.use(express.json({ limit: "5mb" }));
+const bigJson = express.json({ limit: "30mb" }); // audlab 전용
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser(SESSION_SECRET)); // CSRF(cookie 모드) 서명용
 app.use(compression());                // 응답 압축
@@ -660,7 +691,7 @@ app.post("/auth/logout-beacon", (req, res) => {
     res.json({ ok: true });
   });
 });
-app.post("/api/audlab/submit", requireLogin, async (req, res) => {
+app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
   try {
     const slot = ensureUserAudlabDir(req);
     if (!slot) return res.status(400).json({ ok:false, error:"ns_unavailable" });
@@ -668,35 +699,52 @@ app.post("/api/audlab/submit", requireLogin, async (req, res) => {
     const { ns, dir } = slot;
     const id = `lab_${Date.now()}`;
 
-    // JSON 저장
+    // 1) PNG 저장 (previewDataURL 필수)
+    const decodedImg = decodeDataURL(req.body?.previewDataURL || req.body?.thumbDataURL || "");
+    if (!decodedImg || !/^image\//.test(decodedImg.mime)) {
+      return res.status(400).json({ ok:false, error:"bad_preview" });
+    }
+    const imgExt  = decodedImg.ext || "png";
+    const imgMime = decodedImg.mime || "image/png";
+    fs.writeFileSync(path.join(dir, `${id}.${imgExt}`), decodedImg.buf);
+
+    // 2) (옵션) 오디오 저장
+    let audioExt = null;
+    let audioMime = null;
+    if (req.body?.audioDataURL) {
+      const decodedAud = decodeDataURL(req.body.audioDataURL);
+      if (decodedAud && /^audio\//.test(decodedAud.mime)) {
+        audioExt = decodedAud.ext || "webm";
+        audioMime = decodedAud.mime || "audio/webm";
+        fs.writeFileSync(path.join(dir, `${id}.${audioExt}`), decodedAud.buf);
+      }
+    }
+
+    // 3) 메타 JSON 저장
     const meta = {
       id,
       ns,
       width: Number(req.body?.width || 0),
       height: Number(req.body?.height || 0),
       strokes: Array.isArray(req.body?.strokes) ? req.body.strokes : [],
-      // 업로드 시점의 작성자 메타(갤러리와 맞춤)
       author: (() => {
         const u = getUserById(req.session.uid);
         return u ? { id: u.id, email: u.email, displayName: getDisplayNameById(u.id), avatarUrl: latestAvatarUrl(u.id) } : null;
       })(),
       createdAt: Date.now(),
-      ext: "png",
-      mime: "image/png",
+      ext: imgExt,
+      mime: imgMime,
+      ...(audioExt ? { audioExt, audioMime } : {}),
     };
     fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(meta));
-
-    // PNG 저장 (dataURL 필수)
-    const decoded = decodeDataURL(req.body?.previewDataURL || req.body?.thumbDataURL || "");
-    if (!decoded) return res.status(400).json({ ok:false, error:"bad_preview" });
-    fs.writeFileSync(path.join(dir, `${id}.png`), decoded.buf);
 
     return res.json({
       ok: true,
       id,
       ns,
-      json: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
-      png:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.png`,
+      json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
+      image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
+      ...(audioExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audioExt}` } : {}),
     });
   } catch (e) {
     return res.status(500).json({ ok:false, error:"submit_failed" });
@@ -720,17 +768,24 @@ app.get("/api/audlab/list", requireLogin, (req, res) => {
     // 최신순
     ids.sort((a,b) => (b > a ? 1 : -1));
 
-    const items = ids.slice(0, 200).map(id => ({
-      id,
-      json: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
-      png:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.png`,
-    }));
+    const items = ids.slice(0, 200).map(id => {
+      // 이미지/오디오 실제 확장자 찾기
+      const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
+      const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]);
+      return {
+        id,
+        json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
+        image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
+        ...(audExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audExt}` } : {})
+      };
+    });
 
     return res.json({ ok:true, ns, items });
   } catch {
     return res.status(500).json({ ok:false, error:"list_failed" });
   }
 });
+
 // ──────────────────────────────────────────────────────────
 // Public profile endpoint
 // ──────────────────────────────────────────────────────────
@@ -839,10 +894,13 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
     const files = fs.readdirSync(dir).filter(f => /\.json$/i.test(f)).sort().reverse();
     const items = files.slice(0, 200).map(f => {
       const id = f.replace(/\.json$/i, "");
+      const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
+      const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]);
       return {
         id,
-        json: `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
-        png:  `/uploads/audlab/${nsSafe(ns)}/${id}.png`,
+        json:  `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
+        image: `/uploads/audlab/${nsSafe(ns)}/${id}.${imgExt}`,
+        ...(audExt ? { audio: `/uploads/audlab/${nsSafe(ns)}/${id}.${audExt}` } : {})
       };
     });
     res.json({ ok:true, ns, items });
@@ -857,20 +915,27 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
     const ns = String(req.query.ns || "").trim();
     const id = String(req.query.id || "").trim();
     if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
-    const jPath = path.join(AUDLAB_ROOT, nsSafe(ns), `${id}.json`);
+    const dir   = path.join(AUDLAB_ROOT, nsSafe(ns));
+    const jPath = path.join(dir, `${id}.json`);
     if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
     const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
     const pointCount = (j.strokes||[]).reduce((s, st)=>s+(st.points?.length||0), 0);
+
+    const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || j.ext || "png";
+    const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]) || j.audioExt || null;
+
     res.json({
       ok:true, ns, id,
       meta: { strokeCount: (j.strokes||[]).length, pointCount, width:j.width, height:j.height },
-      jsonUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
-      pngUrl:  `/uploads/audlab/${nsSafe(ns)}/${id}.png`
+      jsonUrl:  `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
+      imageUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${imgExt}`,
+      ...(audExt ? { audioUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${audExt}` } : {})
     });
   } catch {
     res.status(500).json({ ok:false, error:"SERVER_ERROR" });
   }
 });
+
 
 app.use("/api", adminRouter);
 
