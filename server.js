@@ -65,24 +65,6 @@ fs.mkdirSync(AVATAR_DIR, { recursive: true });
 const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
 fs.mkdirSync(AUDLAB_ROOT, { recursive: true });
 
-// [ADD] 유저 업로드/아바타 파일 하드 삭제
-function removeUserUploads(email, uid) {
-  try {
-    const nsDir = path.join(AUDLAB_ROOT, encodeURIComponent(String(email || "").toLowerCase()));
-    try { if (fs.existsSync(nsDir)) fs.rmSync(nsDir, { recursive: true, force: true }); } catch {}
-  } catch {}
-  try {
-    if (uid != null) {
-      const files = fs.readdirSync(AVATAR_DIR);
-      for (const f of files) {
-        if (f.startsWith(`${uid}-`) && /\.(webp|png|jpe?g|gif)$/i.test(f)) {
-          try { fs.unlinkSync(path.join(AVATAR_DIR, f)); } catch {}
-        }
-      }
-    }
-  } catch {}
-}
-
 function findFirstExisting(dir, id, exts) {
   for (const e of exts) {
     const p = path.join(dir, `${id}.${e}`);
@@ -249,6 +231,74 @@ process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
 process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 function ensureDir(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
+
+// [ADD] 유저 업로드/아바타 파일 하드 삭제
+function removeUserAssets(email, uid) {
+  // why: 재가입/탈퇴 시 사용자 흔적(파일/인덱스/아바타)을 완전히 제거
+  const safeEmail = encodeURIComponent(String(email || "").trim().toLowerCase());
+  if (!safeEmail) return;
+
+  // 1) audlab/<email> 제거
+  try {
+    const audlabNsDir = path.join(AUDLAB_ROOT, safeEmail);
+    if (audlabNsDir.startsWith(AUDLAB_ROOT + path.sep) && fs.existsSync(audlabNsDir)) {
+      fs.rmSync(audlabNsDir, { recursive: true, force: true });
+    }
+  } catch {}
+
+  // 2) uploads/<email> 제거 (아바타 디렉토리는 건드리지 않음)
+  try {
+    const uploadsNsDir = path.join(UPLOAD_ROOT, safeEmail);
+    // 안전가드: avatars 폴더와 동일하지 않아야 함
+    if (
+      uploadsNsDir.startsWith(UPLOAD_ROOT + path.sep) &&
+      uploadsNsDir !== AVATAR_DIR &&
+      fs.existsSync(uploadsNsDir)
+    ) {
+      fs.rmSync(uploadsNsDir, { recursive: true, force: true });
+    }
+  } catch {}
+
+  // 3) avatars/<uid>-*.ext 제거
+  try {
+    if (uid != null) {
+      const files = fs.readdirSync(AVATAR_DIR);
+      for (const f of files) {
+        if (f.startsWith(`${uid}-`) && /\.(webp|png|jpe?g|gif)$/i.test(f)) {
+          try { fs.unlinkSync(path.join(AVATAR_DIR, f)); } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+
+async function handleAccountDelete(req, res) {
+  if (!req.session?.uid) return res.status(401).json({ ok:false, error:"auth_required" });
+
+  const uid = req.session.uid;
+  const row = getUserById(uid);
+  const email = row?.email || "";
+
+  // 파일/디렉토리/아바타 정리
+  removeUserAssets(email, uid);
+
+  // ✅ 이 유저의 좋아요/투표도 같이 삭제 (카운트 왜곡 방지)
+  try {
+    db.prepare('DELETE FROM item_likes WHERE user_id=?').run(uid);
+    db.prepare('DELETE FROM item_votes WHERE user_id=?').run(uid);
+  } catch {}
+
+  // 유저 삭제 (user_states 는 FK CASCADE)
+  deleteUser(uid);
+
+  // 세션/쿠키 정리
+  const name = PROD ? "__Host-sid" : "sid";
+  const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
+  const done = () => { try { res.clearCookie(name, clearOpts); } catch {}
+                      try { res.clearCookie(CSRF_COOKIE_NAME, clearOpts); } catch {}
+                      res.status(204).end(); };
+  return req.session ? req.session.destroy(done) : done();
+}
 
 // dataURL → Buffer
 function decodeDataURL(dataURL) {
@@ -593,26 +643,6 @@ const EmailPw = z.object({
 // 인증 라우트
 // ──────────────────────────────────────────────────────────
 
-async function handleAccountDelete(req, res) {
-  if (!req.session?.uid) return res.status(401).json({ ok:false, error:"auth_required" });
-
-  const uid = req.session.uid;
-  const row = getUserById(uid);
-  const email = row?.email || "";
-
-  removeUserUploads(email, uid); // why: 디스크 클린업
-  deleteUser(uid);               // why: FK CASCADE
-
-  const name = PROD ? "__Host-sid" : "sid";
-  const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
-  const done = () => {
-    try { res.clearCookie(name, clearOpts); } catch {}
-    try { res.clearCookie(CSRF_COOKIE_NAME, clearOpts); } catch {}
-    return res.status(204).end();
-  };
-  return req.session ? req.session.destroy(done) : done();
-}
-
 // [NEW] Keepalive ping (GET)
 app.get("/auth/ping", (req, res) => {
   sendNoStore(res);
@@ -637,25 +667,19 @@ app.post("/auth/signup", csrfProtection, async (req, res) => {
   const normEmail = String(email || "").toLowerCase();
 
   const hash = await argon2.hash(password, {
-    type: argon2.argon2id,
-    memoryCost: 65536,
-    timeCost: 3,
-    parallelism: 1,
+    type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1,
   });
 
   try {
     const userId = createUser(normEmail, hash);
 
-    // === “초기화” 보장: 같은 이메일의 과거 잔여물 제거 ===
-    // 1) 상태 초기화 (user_states 전부 제거; 멱등)
+    // 1) 상태 초기화 (멱등)
     try { deleteAllStatesForEmail(normEmail); } catch {}
-
-    // 2) 파일 네임스페이스 초기화: /public/uploads/audlab/<email> 제거
-    try { removeUserUploads(normEmail /* email */, undefined /* uid 없음 */); } catch {}
+    // 2) 파일 네임스페이스 초기화: audlab/<email>, uploads/<email> 모두 제거
+    try { removeUserAssets(normEmail /* email only */); } catch {}
 
     return res.status(201).json({ ok: true, id: userId });
   } catch (e) {
-    // 이미 존재하면 기존 동작 그대로
     return res.status(409).json({ ok: false, error: "DUPLICATE_EMAIL" });
   }
 });
