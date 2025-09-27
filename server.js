@@ -53,8 +53,9 @@ const {
   getUserById,
   getUserState,
   putUserState,
-  putStateByEmail, // ✅ email-ns 저장
-  deleteUser,             // [ADD]
+  putStateByEmail,
+  deleteUser,
+  deleteAllStatesForEmail,   // [ADD]
 } = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
@@ -633,14 +634,28 @@ app.post("/auth/signup", csrfProtection, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ ok: false, error: "INVALID" });
 
   const { email, password } = parsed.data;
+  const normEmail = String(email || "").toLowerCase();
+
   const hash = await argon2.hash(password, {
-    type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1,
+    type: argon2.argon2id,
+    memoryCost: 65536,
+    timeCost: 3,
+    parallelism: 1,
   });
 
   try {
-    const userId = createUser(email.toLowerCase(), hash);
+    const userId = createUser(normEmail, hash);
+
+    // === “초기화” 보장: 같은 이메일의 과거 잔여물 제거 ===
+    // 1) 상태 초기화 (user_states 전부 제거; 멱등)
+    try { deleteAllStatesForEmail(normEmail); } catch {}
+
+    // 2) 파일 네임스페이스 초기화: /public/uploads/audlab/<email> 제거
+    try { removeUserUploads(normEmail /* email */, undefined /* uid 없음 */); } catch {}
+
     return res.status(201).json({ ok: true, id: userId });
   } catch (e) {
+    // 이미 존재하면 기존 동작 그대로
     return res.status(409).json({ ok: false, error: "DUPLICATE_EMAIL" });
   }
 });

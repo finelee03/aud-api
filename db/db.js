@@ -147,6 +147,10 @@ const stmtDeleteState = db.prepare(`
   WHERE user_id = ? AND ns = ?
 `);
 
+const stmtGetUserIdByEmail = db.prepare(`
+  SELECT id FROM users WHERE email = LOWER(?) LIMIT 1
+`);
+
 // email-first helpers
 const stmtDeleteAllStatesForUser = db.prepare(`
   DELETE FROM user_states WHERE user_id = ?
@@ -308,6 +312,30 @@ function withTransaction(fn) {
   return tx();
 }
 
+// 멱등: 이메일이 없거나 유저가 없어도 true
+function deleteAllStatesForEmail(email) {
+  try {
+    const norm = normalizeEmail(email);
+    if (!norm) return true;
+    const row = stmtGetUserIdByEmail.get(norm);
+    if (!row || !row.id) return true;
+    stmtDeleteAllStatesForUser.run(row.id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 기존 deleteUser에서 쓰던 내부 헬퍼 노출이 필요하면 다음도 유지
+function deleteAllStatesForUser(userId) {
+  try {
+    stmtDeleteAllStatesForUser.run(Number(userId));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Exports
 // ────ㅁ─────────────────────────────────────────────────────────
@@ -321,7 +349,8 @@ module.exports = {
   getUserById,
   updateUserProfile,
   deleteUser,                 // [ADD]
-  deleteAllStatesForUser,     // [ADD] ensure exported
+  deleteAllStatesForEmail,
+  deleteAllStatesForUser,    // [ADD] ensure exported
 
   // states
   getUserState,
