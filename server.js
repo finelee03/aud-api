@@ -47,11 +47,17 @@ const {
   db, createUser, getUserByEmail, getUserById,
   getUserState, putUserState,
   getUserEmailById, getStateByEmail, putStateByEmail, deleteAllStatesForUser,
+  migrateAllUserStatesToEmail, // ★ 추가: 이메일 NS 마이그레이션
 } = require("./db");
 
   seedAdminUsers();
 
-const { startBleBridge } = require("./ble-bridge");
+let startBleBridge = null;
+try {
+  ({ startBleBridge } = require("./ble-bridge"));
+} catch {
+  // optional module
+}
 
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
@@ -68,12 +74,40 @@ function findFirstExisting(dir, id, exts) {
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
 
-// ──────────────────────────────────────────────────────────
-// Hard reset on boot (opt-in via env)
-// ──────────────────────────────────────────────────────────
+// 2) 부팅 시 조건부 마이그레이션 훅 추가 (hardResetOnBoot 호출 부근에 배치)
+function migrateEmailNsOnBoot() {
+  // why: 운영에선 명시 opt-in, 개발에선 안전 기본 off
+  const want =
+    process.env.MIGRATE_EMAIL_NS_ON_BOOT === "1" ||
+    (process.env.NODE_ENV !== "production" && process.env.MIGRATE_EMAIL_NS_ON_BOOT === "dev");
+  if (!want) return;
+
+  try {
+    if (typeof migrateAllUserStatesToEmail !== "function") {
+      console.log("[MIGRATE] skip: migrateAllUserStatesToEmail not available");
+      return;
+    }
+    console.log("[MIGRATE] consolidating user_states to email namespace...");
+    const stats = migrateAllUserStatesToEmail();
+    // 표 형태 요약
+    try {
+      // console.table 이 없는 환경도 있으니 안전 호출
+      console.table?.(stats);
+    } catch {}
+    console.log("[MIGRATE] done:", stats);
+  } catch (e) {
+    console.error("[MIGRATE] failed:", e?.stack || e);
+  }
+}
+
+
 function hardResetOnBoot() {
   try {
-    if (process.env.HARD_RESET_ON_BOOT !== '1') return;
+    // 프로덕션이 아니면 기본 초기화, 프로덕션에서는 opt-in
+    const want =
+      (process.env.NODE_ENV !== 'production' && process.env.HARD_RESET_ON_BOOT !== '0')
+      || process.env.HARD_RESET_ON_BOOT === '1';
+    if (!want) return;
     console.log('[BOOT] HARD_RESET_ON_BOOT=1 → wiping server-side state...');
     // 1) 앱 상태(DB 내 user_states / votes / likes 등)
     try { db.exec('DELETE FROM user_states'); } catch {}
@@ -104,17 +138,58 @@ function rmrfSafe(dir) {
 function purgeAllUserData(uid) {
   if (!uid) return;
   try {
-    // 1) 상태/소셜/좋아요 등 레코드 제거(테이블은 환경마다 다를 수 있으므로 try/catch 다중 시도)
+    let email = null;
+    try { email = String(getUserEmailById(uid) || '').toLowerCase(); } catch {}
+    // 1) 상태/소셜/좋아요 등 레코드 제거
     try { db.prepare('DELETE FROM user_states WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM item_likes  WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM item_votes  WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM items       WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM avatars     WHERE user_id=?').run(uid); } catch {}
-    // 2) 업로드 디렉토리/아바타 파일(프로젝트 구조에 맞게 후보 경로 정리)
+
+    // 2) 파일 시스템(업로드/오디오랩)
     try { rmrfSafe(path.join(UPLOAD_ROOT, String(uid))); } catch {}
-    try { rmrfSafe(path.join(UPLOAD_ROOT, 'avatars', String(uid))); } catch {}
-    try { rmrfSafe(path.join(UPLOAD_ROOT, 'audlab',  String(uid))); } catch {}
+    if (email) {
+      try { rmrfSafe(path.join(UPLOAD_ROOT, encodeURIComponent(email))); } catch {}
+      try { rmrfSafe(path.join(USER_AUDLAB_ROOT, encodeURIComponent(email))); } catch {}
+    }
   } catch {}
+}
+
+// 2) /auth/me 응답에 emailNS 추가(레거시 ns=uid는 유지)
+function meHandler(req, res) {
+  sendNoStore(res);
+  const base = statusPayload(req);
+  if (!base.authenticated) return res.json(base);
+
+  const u = getUserById(req.session.uid);
+
+  // display_name 안전 조회
+  let displayName = null;
+  try {
+    const cols = db.prepare("PRAGMA table_info(users)").all().map(r => String(r.name));
+    if (cols.includes("display_name")) {
+      const r = db.prepare("SELECT display_name FROM users WHERE id=?").get(req.session.uid);
+      displayName = r?.display_name || null;
+    }
+  } catch {}
+
+  const avatarUrl = latestAvatarUrl(req.session.uid);
+  const emailNS = getNS(req); // ← 이메일 기반 NS (서버가 강제)
+
+  const payload = {
+    ...base,
+    user: u ? { id: u.id, email: u.email, displayName } : null,
+    ns: String(req.session.uid),            // 레거시(FE가 uid를 기대하던 경우)
+    emailNS,                                // ✅ 신규: FE는 이 값을 실제 NS로 사용
+  };
+  if (u) {
+    payload.email = u.email;
+    payload.displayName = displayName;
+    payload.name = displayName;
+    payload.avatarUrl = avatarUrl;
+  }
+  return res.json(payload);
 }
 
 /** 계정 삭제 공통 처리 */
@@ -122,6 +197,7 @@ function deleteMyAccount(req, res) {
   if (!req.session?.uid) return res.status(401).json({ ok:false });
   const uid = Number(req.session.uid);
   try { deleteAllStatesForUser(uid); } catch {}
+  try { purgeAllUserData(uid); } catch {}
   try { db.prepare("DELETE FROM users WHERE id=?").run(uid); } catch {}
   const clearOpts = { path:"/", sameSite: "lax", secure: process.env.NODE_ENV==="production" };
   const sidName = process.env.NODE_ENV === "production" ? "__Host-sid" : "sid";
@@ -141,7 +217,7 @@ const app = express();
 app.set('trust proxy', 1);
 
 function ensureUserAudlabDir(req) {
-  const ns = String(req.session?.uid || "").toLowerCase(); // 숫자 uid(ns)
+  const ns = getNS(req); // ← 로그인 사용자의 이메일(소문자) 반환
   if (!ns) return null;
   const dir = path.join(USER_AUDLAB_ROOT, encodeURIComponent(ns));
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
@@ -298,7 +374,7 @@ function decodeDataURL(dataURL) {
     "audio/wav": "wav",
     "audio/x-wav": "wav",
     "audio/mp4": "m4a",
-    "audio/aac": "m4a",
+    "audio/aac": "aac",
   };
 
   // 불특정 파라미터가 붙어도 base mime으로 매핑
@@ -356,6 +432,7 @@ app.use(
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
         "connect-src": connectSrc,
+        "frame-ancestors": ["'none'"],
         "img-src": [
           "'self'", "data:", "blob:",
           ...((process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "")
@@ -566,7 +643,9 @@ function publicUserShape(viewerUid, userRow) {
 function authorProfileShape(userRow) {
   if (!userRow) return null;
   const email = String(userRow.email || "");
-  const displayName = userRow.displayName || (email ? email.split("@")[0] : null);
+  const displayName =
+    (typeof getDisplayNameById === "function" ? getDisplayNameById(userRow.id) : null)
+    || (email ? email.split("@")[0] : null);
   return {
     id: userRow.id,
     email,                     // ← 작성자용: 마스킹 없음
@@ -641,7 +720,7 @@ function applyNameChange(req, res) {
 
   const u = getUserById(req.session.uid);
   const avatarUrl = latestAvatarUrl(req.session.uid);
-  return res.json({ ok:true, user:{ id:u.id, email:u.email, displayName } });
+  return res.json({ ok:true, user:{ id:u.id, email:u.email, displayName, avatarUrl } });
 }
 
 const EmailPw = z.object({
@@ -933,13 +1012,16 @@ app.post(
         req.body?.avatarDataURL ||
         req.body?.thumbDataURL || "";
       const decoded = decodeDataURL(raw);
-      if (decoded && (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime))) {
+      if (!decoded) {
+        return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
+      }
+      if (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime)) {
         return res.status(400).json({ ok:false, msg:"bad_image_mime" });
       }
-      if (decoded && decoded.buf.length > 8 * 1024 * 1024) {
+      if (decoded.buf.length > 8 * 1024 * 1024) {
         return res.status(413).json({ ok:false, msg:"image_too_large" });
       }
-      if (decoded) { buf = decoded.buf; }
+      buf = decoded.buf;
     }
 
     if (!buf) return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
@@ -979,6 +1061,16 @@ const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
 try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
+
+app.post("/admin/migrate/email-ns", requireAdmin, csrfProtection, (req, res) => {
+  // why: 여러 FE/프록시에서 호출할 수 있게 JSON 결과 반환
+  try {
+    const stats = migrateAllUserStatesToEmail();
+    return res.json({ ok: true, stats });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:"migrate_failed", message: e?.message || String(e) });
+  }
+});
 
 // 업로드된 NS 리스트
 adminRouter.get("/admin/audlab/nses", requireAdmin, (req, res) => {
@@ -1301,44 +1393,6 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   });
 });
 
-
-// me & ping
-function meHandler(req, res) {
-  sendNoStore(res);
-  const base = statusPayload(req);
-  if (!base.authenticated) return res.json(base);
-
-  const u = getUserById(req.session.uid);
-
-  // display_name 컬럼이 있어도/없어도 안전하게 읽기
-  let displayName = null;
-  try {
-    const cols = db.prepare("PRAGMA table_info(users)").all().map(r => String(r.name));
-    if (cols.includes("display_name")) {
-      const r = db.prepare("SELECT display_name FROM users WHERE id=?").get(req.session.uid);
-      displayName = r?.display_name || null;
-    }
-  } catch {}
-
-  const avatarUrl = latestAvatarUrl(req.session.uid);
-
-  // ★ user 안과 top-level 둘 다 넣어 FE 호환 보장
-  const payload = {
-    ...base,
-    user: u ? { id: u.id, email: u.email, displayName } : null,
-    ns: String(req.session.uid),
-  };
-  if (u) {
-    payload.email = u.email;        // legacy FE 호환
-    payload.displayName = displayName;
-    payload.name = displayName;     // name 키로만 읽는 클라 대비
-    payload.avatarUrl = avatarUrl;
-  }
-  return res.json(payload);
-}
-
-app.get(["/auth/me", "/api/auth/me"], meHandler);
-
 // 경량 헬스체크
 app.get("/api/healthz", (_req, res) => {
   res.set("Cache-Control", "no-store");
@@ -1551,7 +1605,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const nsFilter    = String(req.query.ns || '').trim().toLowerCase();
         const labelFilter = String(req.query.label || '').trim();
 
-        const SKIP_DIRS = new Set(['avatars']); // 아바타 폴더 제외
+        const SKIP_DIRS = new Set(['avatars','audlab']); // 갤러리 외 디렉토리 제외
         // 1) ns 디렉토리 나열
         let nss = [];
         try {
@@ -1695,11 +1749,10 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if ((!it.user.avatarUrl   || it.user.avatarUrl   === null) && it.author?.avatarUrl)   it.user.avatarUrl   = it.author.avatarUrl;
 
           // 4) mine 플래그
-          it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
+          it.mine = String(it.ns || '').toLowerCase() === String(getNS(req) || '').toLowerCase();
 
           // 5) 알림 라우팅용: id -> owner ns 맵 업데이트
-          if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
-          globalThis.ITEM_OWNER_NS.set(String(it.id), String(it.ns));
+          ITEM_OWNER_NS.set(String(it.id), String(it.ns));
         }
 
         const next = (all.length > limit && slice.length)
@@ -1769,7 +1822,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const ns  = getNS(req);
         const label = String(req.body?.label || req.body?.choice || '').trim();
         if (!isVoteLabel(label)) return res.status(400).json({ ok:false, error:'bad-label' });
-
+        const prev = db.prepare('SELECT label FROM item_votes WHERE item_id=? AND user_id=?').get(id, uid)?.label || null;
         db.prepare(`
           INSERT INTO item_votes(item_id,user_id,label,created_at)
           VALUES(?,?,?,?)
@@ -1792,7 +1845,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const label = String(req.body?.label || req.body?.choice || '').trim();
         if (!id) return res.status(400).json({ ok:false, error:'bad-item' });
         if (!isVoteLabel(label)) return res.status(400).json({ ok:false, error:'bad-label' });
-
+        const prev = db.prepare('SELECT label FROM item_votes WHERE item_id=? AND user_id=?').get(id, uid)?.label || null;
         db.prepare(`
           INSERT INTO item_votes(item_id,user_id,label,created_at)
           VALUES(?,?,?,?)
@@ -2014,8 +2067,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         if (!out.user?.avatarUrl   && out.author?.avatarUrl)   out.user.avatarUrl   = out.author.avatarUrl;
 
         // 5) 알림 라우팅용 맵 갱신
-        if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
-        globalThis.ITEM_OWNER_NS.set(String(out.id), ownerNs);
+        ITEM_OWNER_NS.set(String(out.id), ownerNs);
 
 
         res.set('Cache-Control', 'no-store');
@@ -2053,7 +2105,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
   upload.single("file"),
   (req, res) => {
     try {
-      const ns = String(req.session.uid).toLowerCase();
+      const ns = getNS(req); // 이메일 네임스페이스
       const {
         id = `g_${Date.now()}`,
         label = "",
@@ -2181,10 +2233,9 @@ function writeJsonAtomic(filePath, dataObj) {
 
 // 내 계정에서 사용할 수 있는 모든 후보 NS (요청 ns, 내 uid, 내 email)
 function getMyNamespaces(req, preferNs) {
-  const uidNs   = String(req.session?.uid || '').toLowerCase();
-  const emailNs = String(getUserById(req.session?.uid || 0)?.email || '').toLowerCase();
-  const pref    = String(preferNs || '').toLowerCase();
-  return [...new Set([pref, uidNs, emailNs].filter(Boolean))];
+  const pref = String(preferNs || '').toLowerCase();
+  const emailNs = getNS(req);
+  return [...new Set([pref, emailNs].filter(Boolean))];
 }
 
 // index/파일을 안전하게 삭제 (index에 없더라도 파일만 있으면 삭제 성공으로 간주)
@@ -2297,12 +2348,9 @@ app.post('/api/delete', requireLogin, csrfProtection, (req, res) => {
 
 // 권한 체크: 요청 ns가 내 uid/email 변형 중 하나와 일치해야 함
 function ensureOwnerNs(req, ns) {
-  const uid   = String(req.session?.uid || '').toLowerCase();
-  const email = String(getUserById(req.session?.uid || 0)?.email || '').toLowerCase();
+  const email = getNS(req);
   ns = String(ns || '').toLowerCase();
-  if (!ns) return false;
-  const variants = [uid, email, `user:${uid}`].filter(Boolean); // ★ email 변형의 user: 접두 삭제
-  return variants.includes(ns);
+  return !!email && ns === email;
 }
 
 // ===== DEV-ONLY: migrate items from 'default' ns to current user's ns =====
@@ -2506,6 +2554,7 @@ function printRoutesSafe() {
 
 // ──────────────────────────────────────────────────────────
 hardResetOnBoot();
+migrateEmailNsOnBoot();
 server.listen(PORT, () => {
   console.log(`listening: http://localhost:${PORT}`);
   if (!PROD) printRoutesSafe();
