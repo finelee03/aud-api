@@ -282,8 +282,6 @@ async function handleAccountDelete(req, res) {
   // 파일/디렉토리/아바타 정리
   removeUserAssets(email, uid);
 
-  try { deleteAllStatesForEmail(email); } catch {}
-
   // ✅ 이 유저의 좋아요/투표도 같이 삭제 (카운트 왜곡 방지)
   try {
     db.prepare('DELETE FROM item_likes WHERE user_id=?').run(uid);
