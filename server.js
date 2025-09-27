@@ -2254,13 +2254,6 @@ function writeJsonAtomic(filePath, dataObj) {
   } catch { return false; }
 }
 
-// 내 계정에서 사용할 수 있는 모든 후보 NS (요청 ns, 내 uid, 내 email)
-function getMyNamespaces(req, preferNs) {
-  const pref = String(preferNs || '').toLowerCase();
-  const emailNs = getNS(req);
-  return [...new Set([pref, emailNs].filter(Boolean))];
-}
-
 // index/파일을 안전하게 삭제 (index에 없더라도 파일만 있으면 삭제 성공으로 간주)
 function removeItemFileAndIndexIn(ns, id) {
   try {
