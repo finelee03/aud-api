@@ -69,6 +69,33 @@ function findFirstExisting(dir, id, exts) {
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
 
+// ──────────────────────────────────────────────────────────
+// Hard reset on boot (opt-in via env)
+// ──────────────────────────────────────────────────────────
+function hardResetOnBoot() {
+  try {
+    if (process.env.HARD_RESET_ON_BOOT !== '1') return;
+    console.log('[BOOT] HARD_RESET_ON_BOOT=1 → wiping server-side state...');
+    // 1) 앱 상태(DB 내 user_states / votes / likes 등)
+    try { db.exec('DELETE FROM user_states'); } catch {}
+    try { db.exec('DELETE FROM item_votes'); } catch {}
+    try { db.exec('DELETE FROM item_likes'); } catch {}
+    try { db.exec('DELETE FROM items'); } catch {}
+    // 2) 업로드 파일들 (유저별 갤러리 / audlab / 아바타)
+    try { rmrfSafe(UPLOAD_ROOT); fs.mkdirSync(UPLOAD_ROOT, { recursive:true }); } catch {}
+    try { rmrfSafe(AVATAR_DIR);  fs.mkdirSync(AVATAR_DIR,  { recursive:true }); } catch {}
+    try { rmrfSafe(USER_AUDLAB_ROOT); fs.mkdirSync(USER_AUDLAB_ROOT, { recursive:true }); } catch {}
+    // 3) 세션 저장소도 날려서 모든 로그인 무효화
+    try {
+      const p = path.join(__dirname, 'sessions.sqlite');
+      if (fs.existsSync(p)) fs.rmSync(p, { force:true });
+    } catch {}
+    console.log('[BOOT] hard reset done.');
+  } catch (e) {
+    console.log('[BOOT] hard reset failed:', e?.message || e);
+  }
+}
+
 /** 재귀 디렉토리 제거(존재해도/없어도 안전) */
 function rmrfSafe(dir) {
   try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch {}
@@ -291,20 +318,9 @@ function decodeDataURL(dataURL) {
   return { mime, buf, ext };
 }
 
-// NS 추출(화이트리스트)
+// NS 추출(세션 강제) — 클라가 보낸 ns는 전부 무시
 function getNS(req) {
-  const norm = (s='') => String(s).trim().toLowerCase();
-
-  // 1) 클라이언트가 보낸 ns 우선
-  const raw = norm(req.body?.ns || req.query?.ns || '');
-
-  // 허용: uid형, user:uid형, email형
-  if (/^[a-z0-9_-]{1,64}$/.test(raw)) return raw;                 // ex) "2"
-  if (/^user:[a-z0-9_-]{1,64}$/.test(raw)) return raw.slice(5);   // ex) "user:2" → "2"
-  if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(raw)) return raw; // 이메일 ns (레거시 호환)
-
-  // 2) 없거나 이상하면 세션 uid로
-  const sess = norm(req.session?.uid || '');
+  const sess = String(req.session?.uid || '').trim().toLowerCase();
   return sess || 'default';
 }
 
@@ -647,7 +663,9 @@ app.get("/auth/ping", (req, res) => {
       if (typeof req.session.touch === "function") req.session.touch(); // rolling 보강
     }
   } catch {}
-  return res.json(statusPayload(req)); // { ok, authenticated, bootId, expires }
+  // 읽기 가능한 부트마커 쿠키(선택)
+  try { res.cookie('app_boot', BOOT_ID, { path:'/', sameSite: CROSS_SITE ? 'none':'lax', secure: PROD||CROSS_SITE }); } catch {}
+  return res.json(statusPayload(req));
 });
 
 
@@ -2486,6 +2504,7 @@ function printRoutesSafe() {
 }
 
 // ──────────────────────────────────────────────────────────
+hardResetOnBoot();
 server.listen(PORT, () => {
   console.log(`listening: http://localhost:${PORT}`);
   if (!PROD) printRoutesSafe();
