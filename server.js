@@ -222,6 +222,8 @@ const ALLOWED_AUDIO_MIMES = new Set([
   "audio/mpeg",  // mp3
   "audio/wav",
   "audio/x-wav",
+  "audio/mp4",
+  "audio/aac",
 ]);
 
 function isAllowedImageMime(mime) {
@@ -274,6 +276,8 @@ function decodeDataURL(dataURL) {
     "audio/mpeg": "mp3",
     "audio/wav": "wav",
     "audio/x-wav": "wav",
+    "audio/mp4": "m4a",
+    "audio/aac": "m4a",
   };
 
   // 불특정 파라미터가 붙어도 base mime으로 매핑
@@ -339,8 +343,8 @@ app.use(
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
         "connect-src": connectSrc,
-        "img-src": ["'self'", "data:", "blob:"],
-        "media-src": ["'self'", "blob:"],
+        "img-src": ["'self'", "data:", "blob:", (process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean)],
+        "media-src": ["'self'", "data:", "blob:", (process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean)],
         "worker-src": ["'self'", "blob:"],
       },
     },
@@ -353,7 +357,14 @@ app.use(express.json({ limit: "5mb" }));
 const bigJson = express.json({ limit: "30mb" }); // audlab 전용
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser(SESSION_SECRET)); // CSRF(cookie 모드) 서명용
-app.use(compression());                // 응답 압축
+// why: 오디오는 압축 대상 제외(스트리밍/Range와 충돌 방지)
+app.use(compression({
+  filter: (req, res) => {
+    const ct = String(res.getHeader("Content-Type")||"").toLowerCase();
+    if (ct.startsWith("audio/")) return false;
+    return compression.filter(req, res);
+  }
+}));                // 응답 압축
 
 // 세션
 const SqliteStore = SqliteStoreFactory(session);
@@ -916,7 +927,10 @@ app.post(
 
 
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
-  setHeaders(res){ res.set("Cache-Control", "public, max-age=31536000, immutable"); }
+  setHeaders(res){
+    res.set("Cache-Control", "public, max-age=31536000, immutable");
+    res.set("Accept-Ranges", "bytes"); // why: 오디오 탐색/부분 요청 부드럽게
+  }
 }));
 
 // === Admin-only endpoints (audlab) ===
