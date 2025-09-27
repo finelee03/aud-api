@@ -1003,7 +1003,27 @@ adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res
 
     let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
     let hit = null;
-    idx = (Array.isArray(idx) ? idx : []).map(m => {
+
+   // 인덱스에 없으면 단건 메타를 읽어 새로 추가
+   if (!hit) {
+     const jPath = path.join(dir, `${id}.json`);
+     if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
+     const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
+     hit = {
+       id,
+       ns,
+       label: j.label || "",
+       createdAt: j.createdAt || Date.now(),
+       width: j.width || 0,
+       height: j.height || 0,
+       ext: j.ext || "png",
+       mime: j.mime || "image/png",
+       author: j.author || null,
+     };
+     idx.unshift(hit); // 최신 앞으로
+   }
+
+    idx = idx.map(m => {
       if (String(m.id) === id) { hit = m; return { ...m, accepted:true, updatedAt:Date.now() }; }
       return m;
     });
