@@ -318,6 +318,7 @@ function decodeDataURL(dataURL) {
     (baseMime.startsWith("audio/") ? baseMime.split("/")[1] : null) || "bin";
   return { mime, buf, ext };
 }
+
 // NS 추출(화이트리스트)
 function getNS(req) {
   const norm = (s='') => String(s).trim().toLowerCase();
@@ -665,17 +666,6 @@ app.post("/auth/signup", csrfProtection, async (req, res) => {
   const { email, password } = parsed.data;
   const normEmail = String(email || "").toLowerCase();
 
-  // 0) 기존 유저 존재 시 완전 삭제(덮어쓰기 가입)
-  try {
-    const exist = getUserByEmail?.(normEmail);
-    if (exist?.id != null) {
-      try { removeUserAssets(normEmail, exist.id); } catch {}    // 파일/디렉토리/아바타 제거
-      try { deleteAllStatesForEmail(normEmail); } catch {}        // 상태 제거 (멱등)
-      try { deleteUser(exist.id); } catch {}                      // 유저 삭제 (CASCADE) 
-    }
-  } catch {}
-
-  // 1) 새로 생성
   const hash = await argon2.hash(password, {
     type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1,
   });
@@ -683,13 +673,13 @@ app.post("/auth/signup", csrfProtection, async (req, res) => {
   try {
     const userId = createUser(normEmail, hash);
 
-    // 2) 안전망: 생성 직후에도 멱등 초기화
-    try { deleteAllStatesForEmail(normEmail); } catch {}          // :contentReference[oaicite:7]{index=7}
-    try { removeUserAssets(normEmail /* email only */); } catch {}// :contentReference[oaicite:8]{index=8}
+    // 1) 상태 초기화 (멱등)
+    try { deleteAllStatesForEmail(normEmail); } catch {}
+    // 2) 파일 네임스페이스 초기화: audlab/<email>, uploads/<email> 모두 제거
+    try { removeUserAssets(normEmail /* email only */); } catch {}
 
     return res.status(201).json({ ok: true, id: userId });
   } catch (e) {
-    // UNIQUE(email) 경합 등으로 실패 시
     return res.status(409).json({ ok: false, error: "DUPLICATE_EMAIL" });
   }
 });
