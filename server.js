@@ -874,6 +874,14 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
 
 app.use("/api", adminRouter);
 
+// server.js, adminRouter 장착 뒤에 추가 (선택사항)
+app.get("/api/audlab/list", requireAdmin, (req, res, next) => {
+  // `/api/admin/audlab/list?ns=...`로 내부 리다이렉트
+  if (!req.query.ns) return res.status(400).json({ ok:false, error:"ns_required" });
+  req.url = `/admin/audlab/list?ns=${encodeURIComponent(String(req.query.ns))}`;
+  next();
+}, app._router); // 같은 앱 라우터로 계속 처리
+
 // 로그인만 필요. 운영자 여부만 알려주는 경량 체크(버튼 노출용)
 app.get("/api/audlab/admin/bootstrap", requireLogin, (req, res) => {
   try {
