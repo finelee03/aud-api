@@ -19,6 +19,31 @@ const compression = require("compression");
 const sharp = require("sharp");
 require("dotenv").config();
 
+// === Admin config & seeding ===
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "finelee03@naver.com")
+  .split(",").map(s => String(s || "").trim().toLowerCase()).filter(Boolean);
+const ADMIN_SEED_PASSWORD = process.env.ADMIN_SEED_PASSWORD || "dlghkdls398!a"; // 반드시 환경변수로 옮기세요.
+
+function isAdminEmail(email) {
+  const e = String(email || "").trim().toLowerCase();
+  return ADMIN_EMAILS.includes(e);
+}
+
+async function seedAdminUsers() {
+  try {
+    for (const email of ADMIN_EMAILS) {
+      const hit = getUserByEmail?.(email);
+      if (hit) continue;
+      const hash = await argon2.hash(ADMIN_SEED_PASSWORD);
+      const uid = createUser(email, hash);
+      console.log(`[admin] seeded admin user ${email} (id=${uid})`);
+    }
+  } catch (e) {
+    console.warn("[admin] seed failed:", e?.message || e);
+  }
+}
+seedAdminUsers(); // fire-and-forget
+
 const { db,                      // better-sqlite3 handle
   createUser,
   getUserByEmail,
@@ -322,6 +347,15 @@ function ensureAuth(req, res, next) {
 function requireLogin(req, res, next) {
   if (req.session?.uid) return next();
   res.status(401).json({ ok: false, error: "auth_required" });
+}
+function getUserRowOrNull(uid) {
+  try { return getUserById ? getUserById(uid) : null; } catch { return null; }
+}
+function requireAdmin(req, res, next) {
+  if (!req.session?.uid) return res.status(401).json({ ok:false, error:"auth_required" });
+  const row = getUserRowOrNull(req.session.uid);
+  if (row && isAdminEmail(row.email)) return next();
+  return res.status(403).json({ ok:false, error:"forbidden" });
 }
 function sendNoStore(res) { res.set("Cache-Control", "no-store"); }
 function statusPayload(req) {
@@ -692,6 +726,72 @@ app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
   setHeaders(res){ res.set("Cache-Control", "public, max-age=31536000, immutable"); }
 }));
 
+// === Admin-only endpoints (audlab) ===
+const adminRouter = express.Router();
+const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
+try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
+
+const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
+
+// 업로드된 NS 리스트
+adminRouter.get("/admin/audlab/nses", requireAdmin, (req, res) => {
+  try {
+    const dirs = fs.readdirSync(AUDLAB_ROOT, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => decodeURIComponent(d.name))
+      .sort();
+    res.json({ ok:true, items: dirs });
+  } catch {
+    res.status(500).json({ ok:false, error:"SERVER_ERROR" });
+  }
+});
+
+// 특정 NS의 제출물 목록
+adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
+  try {
+    const ns = String(req.query.ns || "").trim();
+    if (!ns) return res.status(400).json({ ok:false, error:"ns_required" });
+    const dir = path.join(AUDLAB_ROOT, nsSafe(ns));
+    try { fs.mkdirSync(dir, { recursive:true }); } catch {}
+    const files = fs.readdirSync(dir).filter(f => /\.json$/i.test(f)).sort().reverse();
+    const items = files.slice(0, 200).map(f => {
+      const id = f.replace(/\.json$/i, "");
+      return {
+        id,
+        json: `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
+        png:  `/uploads/audlab/${nsSafe(ns)}/${id}.png`,
+      };
+    });
+    res.json({ ok:true, ns, items });
+  } catch {
+    res.status(500).json({ ok:false, error:"SERVER_ERROR" });
+  }
+});
+
+// 단건 메타(선택)
+adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
+  try {
+    const ns = String(req.query.ns || "").trim();
+    const id = String(req.query.id || "").trim();
+    if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
+    const jPath = path.join(AUDLAB_ROOT, nsSafe(ns), `${id}.json`);
+    if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
+    const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
+    const pointCount = (j.strokes||[]).reduce((s, st)=>s+(st.points?.length||0), 0);
+    res.json({
+      ok:true, ns, id,
+      meta: { strokeCount: (j.strokes||[]).length, pointCount, width:j.width, height:j.height },
+      jsonUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
+      pngUrl:  `/uploads/audlab/${nsSafe(ns)}/${id}.png`
+    });
+  } catch {
+    res.status(500).json({ ok:false, error:"SERVER_ERROR" });
+  }
+});
+
+app.use("/api", adminRouter);
+
+
 // 비밀번호 변경
 app.post("/auth/password",        requireLogin, csrfProtection, applyPasswordChange);
 app.post("/auth/change-password", requireLogin, csrfProtection, applyPasswordChange);
@@ -812,6 +912,16 @@ app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
 // ──────────────────────────────────────────────────────────
 mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
+
+// audlab REST (submit/list) — routes are absolute (/api/audlab/*), so mount at root
+try {
+  const audlabRouter = require(path.join(__dirname, "audlab-router"));
+  app.use("/", audlabRouter);
+  console.log("[router] mounted audlab-router at /");
+} catch (e) {
+  console.log("[router] audlab-router not found:", e?.message || e);
+}
+
 mountIfExists(path.join(__dirname, "audlab-router"), "/"); // mounts at /api
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
