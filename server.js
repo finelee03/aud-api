@@ -745,6 +745,10 @@ app.get("/auth/ping", (req, res) => {
   return res.json(statusPayload(req));
 });
 
+// ✅ 로그인 상태/프로필 동기화
+app.get("/auth/me", requireLogin, (req, res) => meHandler(req, res));
+// (선택) 프록시/클라 호환용 별칭
+app.get("/api/auth/me", requireLogin, (req, res) => meHandler(req, res));
 
 app.get("/auth/csrf", csrfProtection, (req, res) => {
   return res.json({ csrfToken: req.csrfToken() });
@@ -2358,7 +2362,7 @@ app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, r
   try {
     const myns     = String(getNS(req) || '').toLowerCase();
     const srcDir = path.join(UPLOAD_ROOT, 'default');
-    const dstDir = path.join(UPLOAD_ROOT, myNs);
+    const dstDir = path.join(UPLOAD_ROOT, myns);
     ensureDir(dstDir);
 
     const readIdx  = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir,'_index.json'),'utf8')) || []; } catch { return []; } };
