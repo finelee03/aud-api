@@ -19,12 +19,6 @@ const compression = require("compression");
 const sharp = require("sharp");
 require("dotenv").config();
 
-const DATA_DIR =
-  process.env.DATA_DIR ||
-  process.env.RENDER_DISK_PATH ||          // (선택) 직접 주입한 디스크 경로
-  (fs.existsSync("/var/data") ? "/var/data" : "/tmp"); // Render 디스크 없으면 /tmp
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-const EFFECTIVE_DATA_DIR = DATA_DIR;
 // === Admin config & seeding ===
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "finelee03@naver.com")
   .split(",").map(s => String(s || "").trim().toLowerCase()).filter(Boolean);
@@ -49,21 +43,19 @@ async function seedAdminUsers() {
   }
 }
 
-const {
-  db, createUser, getUserByEmail, getUserById,
-  getUserState, putUserState,
-  getUserEmailById, getStateByEmail, putStateByEmail, deleteAllStatesForUser,
-  migrateAllUserStatesToEmail, // ★ 추가: 이메일 NS 마이그레이션
-} = require("./db");
+const { db,                      // better-sqlite3 handle
+  createUser,
+  getUserByEmail,
+  getUserById,
+  getUserState,
+  putUserState, } = require("./db");
 
   seedAdminUsers();
 
-let startBleBridge = null;
-try {
-  ({ startBleBridge } = require("./ble-bridge"));
-} catch {
-  // optional module
-}
+const { startBleBridge } = require("./ble-bridge");
+
+const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
 function findFirstExisting(dir, id, exts) {
   for (const e of exts) {
@@ -77,170 +69,63 @@ function findFirstExisting(dir, id, exts) {
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
 
-function getMyNamespaces(req, preferNs) {
-  const pref = String(preferNs || '').toLowerCase();     // 주로 이메일 NS
-  const emailNs = getNS(req);                            // 이메일 NS
-  const uidNs = String(req.session?.uid || '').trim();   // ← 레거시 숫자 uid 폴더
-  return [...new Set([pref, emailNs, uidNs].filter(Boolean))];
-}
-
-// 2) 부팅 시 조건부 마이그레이션 훅 추가 (hardResetOnBoot 호출 부근에 배치)
-function migrateEmailNsOnBoot() {
-  // why: 운영에선 명시 opt-in, 개발에선 안전 기본 off
-  const want =
-    process.env.MIGRATE_EMAIL_NS_ON_BOOT === "1" ||
-    (process.env.NODE_ENV !== "production" && process.env.MIGRATE_EMAIL_NS_ON_BOOT === "dev");
-  if (!want) return;
-
-  try {
-    if (typeof migrateAllUserStatesToEmail !== "function") {
-      console.log("[MIGRATE] skip: migrateAllUserStatesToEmail not available");
-      return;
-    }
-    console.log("[MIGRATE] consolidating user_states to email namespace...");
-    const stats = migrateAllUserStatesToEmail();
-    // 표 형태 요약
-    try {
-      // console.table 이 없는 환경도 있으니 안전 호출
-      console.table?.(stats);
-    } catch {}
-    console.log("[MIGRATE] done:", stats);
-  } catch (e) {
-    console.error("[MIGRATE] failed:", e?.stack || e);
-  }
-}
-
-
-function hardResetOnBoot() {
-  try {
-    // 프로덕션이 아니면 기본 초기화, 프로덕션에서는 opt-in
-    const want =
-      (process.env.NODE_ENV !== 'production' && process.env.HARD_RESET_ON_BOOT !== '0')
-      || process.env.HARD_RESET_ON_BOOT === '1';
-    if (!want) return;
-    console.log('[BOOT] HARD_RESET_ON_BOOT=1 → wiping server-side state...');
-    // 1) 앱 상태(DB 내 user_states / votes / likes 등)
-    try { db.exec('DELETE FROM user_states'); } catch {}
-    try { db.exec('DELETE FROM item_votes'); } catch {}
-    try { db.exec('DELETE FROM item_likes'); } catch {}
-    try { db.exec('DELETE FROM items'); } catch {}
-    // 2) 업로드 파일들 (유저별 갤러리 / audlab / 아바타)
-    try { rmrfSafe(UPLOAD_ROOT); fs.mkdirSync(UPLOAD_ROOT, { recursive:true }); } catch {}
-    try { rmrfSafe(AVATAR_DIR);  fs.mkdirSync(AVATAR_DIR,  { recursive:true }); } catch {}
-    try { rmrfSafe(USER_AUDLAB_ROOT); fs.mkdirSync(USER_AUDLAB_ROOT, { recursive:true }); } catch {}
-    // 3) 세션 저장소도 날려서 모든 로그인 무효화
-    try {
-      if (fs.existsSync(SESSION_DB_PATH)) fs.rmSync(SESSION_DB_PATH, { force:true });
-    } catch {}
-    console.log('[BOOT] hard reset done.');
-  } catch (e) {
-    console.log('[BOOT] hard reset failed:', e?.message || e);
-  }
-}
-
-/** 재귀 디렉토리 제거(존재해도/없어도 안전) */
-function rmrfSafe(dir) {
-  try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-}
-
-/** 단일 유저의 모든 데이터 정리 (best-effort) */
-function purgeAllUserData(uid) {
-  if (!uid) return;
-  try {
-    let email = null;
-    try { email = String(getUserEmailById(uid) || '').toLowerCase(); } catch {}
-    // 1) 상태/소셜/좋아요 등 레코드 제거
-    try { db.prepare('DELETE FROM user_states WHERE user_id=?').run(uid); } catch {}
-    try { db.prepare('DELETE FROM item_likes  WHERE user_id=?').run(uid); } catch {}
-    try { db.prepare('DELETE FROM item_votes  WHERE user_id=?').run(uid); } catch {}
-    try { db.prepare('DELETE FROM items       WHERE user_id=?').run(uid); } catch {}
-    try { db.prepare('DELETE FROM avatars     WHERE user_id=?').run(uid); } catch {}
-
-    // 2) 파일 시스템(업로드/오디오랩)
-    try { rmrfSafe(path.join(UPLOAD_ROOT, String(uid))); } catch {}
-    if (email) {
-      try { rmrfSafe(path.join(UPLOAD_ROOT, encodeURIComponent(email))); } catch {}
-      try { rmrfSafe(path.join(USER_AUDLAB_ROOT, encodeURIComponent(email))); } catch {}
-    }
-  } catch {}
-}
-
-// 2) /auth/me 응답에 emailNS 추가(레거시 ns=uid는 유지)
-function meHandler(req, res) {
-  sendNoStore(res);
-  const base = statusPayload(req);
-  if (!base.authenticated) return res.json(base);
-
-  const u = getUserById(req.session.uid);
-
-  // display_name 안전 조회
-  let displayName = null;
-  try {
-    const cols = db.prepare("PRAGMA table_info(users)").all().map(r => String(r.name));
-    if (cols.includes("display_name")) {
-      const r = db.prepare("SELECT display_name FROM users WHERE id=?").get(req.session.uid);
-      displayName = r?.display_name || null;
-    }
-  } catch {}
-
-  const avatarUrl = latestAvatarUrl(req.session.uid);
-  const emailNS = getNS(req); // ← 이메일 기반 NS (서버가 강제)
-
-  const payload = {
-    ...base,
-    user: u ? { id: u.id, email: u.email, displayName } : null,
-    ns: String(req.session.uid),            // 레거시(FE가 uid를 기대하던 경우)
-    emailNS,                                // ✅ 신규: FE는 이 값을 실제 NS로 사용
-  };
-  if (u) {
-    payload.email = u.email;
-    payload.displayName = displayName;
-    payload.name = displayName;
-    payload.avatarUrl = avatarUrl;
-  }
-  return res.json(payload);
-}
-
-/** 계정 삭제 공통 처리 */
-function deleteMyAccount(req, res) {
-  if (!req.session?.uid) return res.status(401).json({ ok:false });
-  const uid = Number(req.session.uid);
-  try { deleteAllStatesForUser(uid); } catch {}
-  try { purgeAllUserData(uid); } catch {}
-  try { db.prepare("DELETE FROM users WHERE id=?").run(uid); } catch {}
-  const clearOpts = { path:"/", sameSite: "lax", secure: process.env.NODE_ENV==="production" };
-  const sidName = process.env.NODE_ENV === "production" ? "__Host-sid" : "sid";
-  const done = () => {
-    try { res.clearCookie(sidName, clearOpts); } catch {}
-    try { res.clearCookie(process.env.NODE_ENV==="production" ? "__Host-csrf" : "csrf", clearOpts); } catch {}
-    return res.status(204).end();
-  };
-  return req.session ? req.session.destroy(done) : done();
-}
-
-// ── Writable upload roots (moved off read-only app dir) ─────────────
-const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(DATA_DIR, "uploads");
-try { fs.mkdirSync(UPLOAD_ROOT, { recursive: true }); } catch {}
-process.env.UPLOAD_ROOT = UPLOAD_ROOT; // 하위 라우터/모듈과 공유
-
-const AVATAR_DIR = path.join(UPLOAD_ROOT, "avatars");
-try { fs.mkdirSync(AVATAR_DIR, { recursive: true }); } catch {}
-
-const USER_AUDLAB_ROOT = path.join(UPLOAD_ROOT, "audlab");
+const USER_AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
 try { fs.mkdirSync(USER_AUDLAB_ROOT, { recursive: true }); } catch {}
-
 
 const BOOT_ID = uuid();
 const app = express();
 app.set('trust proxy', 1);
 
+// === FORCE CORS (hotfix) ===
+app.use((req, res, next) => {
+  const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "https://finelee03.github.io").split(",");
+  const ALLOWED = RAW.map(s => String(s||"").trim().replace(/\/$/, "").toLowerCase()).filter(Boolean);
+  const origin = String(req.headers.origin || "").trim().replace(/\/$/, "").toLowerCase();
+  const ok = !ALLOWED.length || ALLOWED.includes(origin);
+  if (ok && origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, x-csrf-token, X-XSRF-Token, x-xsrf-token, Authorization");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+  if (req.method === "OPTIONS") { res.status(204).end(); return; }
+  next();
+});
+
 function ensureUserAudlabDir(req) {
-  const ns = getNS(req); // ← 로그인 사용자의 이메일(소문자) 반환
+  const ns = String(req.session?.uid || "").toLowerCase(); // 숫자 uid(ns)
   if (!ns) return null;
   const dir = path.join(USER_AUDLAB_ROOT, encodeURIComponent(ns));
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   return { ns, dir };
 }
+
+// === [PATCH] Always-on CORS headers (before any routes) ===
+(function applyAlwaysOnCORS(app){
+  try {
+    const RAW = (process.env.ALLOWED_ORIGINS || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").trim());
+    const ALLOWED = RAW.map(s => s.replace(/\/$/, "").toLowerCase()).filter(Boolean);
+    const ENABLED = (process.env.CROSS_SITE === "1" || process.env.ALLOW_CROSS_SITE === "1");
+    if (!ENABLED) return;
+    app.use((req, res, next) => {
+      const origin = String(req.headers.origin || "").replace(/\/$/, "").toLowerCase();
+      const ok = !ALLOWED.length || ALLOWED.includes(origin);
+      if (ok && origin) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+        res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, x-csrf-token, X-XSRF-Token, x-xsrf-token, Authorization");
+        res.setHeader("Access-Control-Max-Age", "86400");
+      }
+      if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
+      next();
+    });
+  } catch {}
+})(app);
+
 
 const server = http.createServer(app);
 
@@ -359,6 +244,9 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
 });
+const UPLOAD_ROOT = path.join(__dirname, "public", "uploads");
+// 서브 라우터들이 동일 경로를 쓰도록 환경변수로 공유
+process.env.UPLOAD_ROOT = process.env.UPLOAD_ROOT || UPLOAD_ROOT;
 // 파일시스템 기반 퍼블릭 피드 폴백 라우트를 항상 장착
 process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
 process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
@@ -389,7 +277,7 @@ function decodeDataURL(dataURL) {
     "audio/wav": "wav",
     "audio/x-wav": "wav",
     "audio/mp4": "m4a",
-    "audio/aac": "aac",
+    "audio/aac": "m4a",
   };
 
   // 불특정 파라미터가 붙어도 base mime으로 매핑
@@ -403,20 +291,28 @@ function decodeDataURL(dataURL) {
   return { mime, buf, ext };
 }
 
-// NS 추출(세션 강제) — 클라가 보낸 ns는 전부 무시
+// NS 추출(화이트리스트)
 function getNS(req) {
-  const uid = Number(req.session?.uid || 0);
-  if (!uid) return "";
-  try {
-    const email = getUserEmailById(uid);
-    return email || "";
-  } catch { return ""; }
+  const norm = (s='') => String(s).trim().toLowerCase();
+
+  // 1) 클라이언트가 보낸 ns 우선
+  const raw = norm(req.body?.ns || req.query?.ns || '');
+
+  // 허용: uid형, user:uid형, email형
+  if (/^[a-z0-9_-]{1,64}$/.test(raw)) return raw;                 // ex) "2"
+  if (/^user:[a-z0-9_-]{1,64}$/.test(raw)) return raw.slice(5);   // ex) "user:2" → "2"
+  if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(raw)) return raw; // 이메일 ns (레거시 호환)
+
+  // 2) 없거나 이상하면 세션 uid로
+  const sess = norm(req.session?.uid || '');
+  return sess || 'default';
 }
 
 
 // ──────────────────────────────────────────────────────────
 // 보안/미들웨어
 // ──────────────────────────────────────────────────────────
+app.set("trust proxy", 1);
 app.disable("x-powered-by");
 
 // ── CORS (교차 출처 프런트 허용) ───────────────────────────────
@@ -447,17 +343,8 @@ app.use(
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
         "connect-src": connectSrc,
-        "frame-ancestors": ["'none'"],
-        "img-src": [
-          "'self'", "data:", "blob:",
-          ...((process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "")
-              .split(",").map(s => s.trim()).filter(Boolean))
-        ],
-        "media-src": [
-          "'self'", "data:", "blob:",
-          ...((process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "")
-              .split(",").map(s => s.trim()).filter(Boolean))
-        ],
+        "img-src": ["'self'", "data:", "blob:", (process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean)],
+        "media-src": ["'self'", "data:", "blob:", (process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean)],
         "worker-src": ["'self'", "blob:"],
       },
     },
@@ -481,39 +368,7 @@ app.use(compression({
 
 // 세션
 const SqliteStore = SqliteStoreFactory(session);
-const SESSION_DB_PATH =
-  process.env.SESSION_DB_PATH ||
-  path.join(DATA_DIR, "sessions.sqlite");
-// ── 세션 DB 파일/디렉토리 보정 ─────────────────────────────
-try {
-  // 디렉토리 퍼미션 보정 (최소 700)
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-  try {
-    const st = fs.statSync(DATA_DIR);
-    const want = 0o700;
-    if ((st.mode & 0o777) !== want) fs.chmodSync(DATA_DIR, want);
-  } catch {}
-
-  // 파일이 없으면 생성(0600), 있으면 퍼미션 보정
-  if (!fs.existsSync(SESSION_DB_PATH)) {
-    const fd = fs.openSync(SESSION_DB_PATH, 'w', 0o600);
-    fs.closeSync(fd);
-  } else {
-    try { fs.chmodSync(SESSION_DB_PATH, 0o600); } catch {}
-  }
-} catch (e) {
-  console.warn('[session.sqlite] preflight failed:', e?.message || e);
-}
-
-const sessionDB = new Sqlite(SESSION_DB_PATH);
-try {
-  // Render NFS에서는 WAL이 깨질 수 있음 → DELETE 모드로 고정
-  sessionDB.pragma('journal_mode = DELETE');
-  sessionDB.pragma('busy_timeout = 5000');
-  sessionDB.pragma('synchronous = NORMAL');
-} catch (e) {
-  console.warn('[session.sqlite] pragma failed:', e?.message || e);
-}
+const sessionDB = new Sqlite(path.join(__dirname, "sessions.sqlite"));
 const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;        // 7일(ms)
 const MAX_AGE_SEC = Math.floor(MAX_AGE_MS / 1000); // 7일(sec)
 
@@ -690,9 +545,7 @@ function publicUserShape(viewerUid, userRow) {
 function authorProfileShape(userRow) {
   if (!userRow) return null;
   const email = String(userRow.email || "");
-  const displayName =
-    (typeof getDisplayNameById === "function" ? getDisplayNameById(userRow.id) : null)
-    || (email ? email.split("@")[0] : null);
+  const displayName = userRow.displayName || (email ? email.split("@")[0] : null);
   return {
     id: userRow.id,
     email,                     // ← 작성자용: 마스킹 없음
@@ -767,7 +620,7 @@ function applyNameChange(req, res) {
 
   const u = getUserById(req.session.uid);
   const avatarUrl = latestAvatarUrl(req.session.uid);
-  return res.json({ ok:true, user:{ id:u.id, email:u.email, displayName, avatarUrl } });
+  return res.json({ ok:true, user:{ id:u.id, email:u.email, displayName } });
 }
 
 const EmailPw = z.object({
@@ -787,21 +640,13 @@ app.get("/auth/ping", (req, res) => {
       if (typeof req.session.touch === "function") req.session.touch(); // rolling 보강
     }
   } catch {}
-  // 읽기 가능한 부트마커 쿠키(선택)
-  try { res.cookie('app_boot', BOOT_ID, { path:'/', sameSite: CROSS_SITE ? 'none':'lax', secure: PROD||CROSS_SITE }); } catch {}
-  return res.json(statusPayload(req));
+  return res.json(statusPayload(req)); // { ok, authenticated, bootId, expires }
 });
 
 
 app.get("/auth/csrf", csrfProtection, (req, res) => {
   return res.json({ csrfToken: req.csrfToken() });
 });
-
-// 🔧 NEW: 클라 호환을 위한 GET 엔드포인트 추가
-app.get("/auth/me", meHandler);
-
-// (선택) 과거 코드 호환용 별칭
-app.get("/api/me", meHandler);
 
 app.post("/auth/signup", csrfProtection, async (req, res) => {
   const parsed = EmailPw.safeParse(req.body);
@@ -835,23 +680,10 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
   if (!ok) return res.status(400).json({ ok: false, error: "BAD_CREDENTIALS" });
 
   req.session.regenerate((err) => {
-    if (err) {
-      console.error('[SESSION] regenerate failed:', err?.message || err);
-      return res.status(500).json({ ok:false, error:'SESSION_REGEN_FAILED' });
-    }
+    if (err) return res.status(500).json({ ok: false });
     req.session.uid = row.id;
     markNavigate(req);
-    // 👇 저장 보장 (스토어 쓰기 실패면 여기서 바로 잡힘)
-    req.session.save((saveErr) => {
-      if (saveErr) {
-        console.error('[SESSION] save failed:', saveErr?.message || saveErr);
-        if (saveErr && (saveErr.code || saveErr.errno)) {
-          console.error('[SESSION] code:', saveErr.code, 'errno:', saveErr.errno);
-        }
-        return res.status(500).json({ ok:false, error:"SESSION_SAVE_FAILED" });
-      }
-      return res.json({ ok: true, id: row.id });
-    });
+    return res.json({ ok: true, id: row.id });
   });
 });
 
@@ -898,24 +730,6 @@ app.post("/auth/logout-beacon", (req, res) => {
     res.json({ ok: true });
   });
 });
-
-// 1) DELETE /auth/me  (정석)
-app.delete("/auth/me", requireLogin, csrfProtection, (req, res) => {
-  deleteMyAccount(req, res);
-});
-
-// 2) POST /auth/delete  (폴백; 일부 FE/프록시 환경 호환)
-app.post("/auth/delete", requireLogin, csrfProtection, (req, res) => {
-  deleteMyAccount(req, res);
-});
-
-// 3) POST /api/users/me  with {_method:"DELETE"} (추가 폴백)
-app.post("/api/users/me", requireLogin, csrfProtection, (req, res) => {
-  const m = String(req.body?._method || "").toUpperCase();
-  if (m === "DELETE") return deleteMyAccount(req, res);
-  return res.status(405).json({ ok:false, error:"method_not_allowed" });
-});
-
 app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
   try {
     const slot = ensureUserAudlabDir(req);
@@ -1078,16 +892,13 @@ app.post(
         req.body?.avatarDataURL ||
         req.body?.thumbDataURL || "";
       const decoded = decodeDataURL(raw);
-      if (!decoded) {
-        return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
-      }
-      if (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime)) {
+      if (decoded && (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime))) {
         return res.status(400).json({ ok:false, msg:"bad_image_mime" });
       }
-      if (decoded.buf.length > 8 * 1024 * 1024) {
+      if (decoded && decoded.buf.length > 8 * 1024 * 1024) {
         return res.status(413).json({ ok:false, msg:"image_too_large" });
       }
-      buf = decoded.buf;
+      if (decoded) { buf = decoded.buf; }
     }
 
     if (!buf) return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
@@ -1114,28 +925,19 @@ app.post(
   }
 );
 
-app.use("/uploads", express.static(UPLOAD_ROOT, {
+app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
   setHeaders(res){
-    res.set("Accept-Ranges", "bytes");
+    res.set("Accept-Ranges", "bytes");                  // ★ 오디오 시킹/부분요청
     res.set("Cache-Control", "public, max-age=31536000, immutable");
   }
 }));
 
 // === Admin-only endpoints (audlab) ===
 const adminRouter = express.Router();
-const AUDLAB_ROOT = USER_AUDLAB_ROOT; // 동일 루트 사용
+const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
+try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
-
-app.post("/admin/migrate/email-ns", requireAdmin, csrfProtection, (req, res) => {
-  // why: 여러 FE/프록시에서 호출할 수 있게 JSON 결과 반환
-  try {
-    const stats = migrateAllUserStatesToEmail();
-    return res.json({ ok: true, stats });
-  } catch (e) {
-    return res.status(500).json({ ok:false, error:"migrate_failed", message: e?.message || String(e) });
-  }
-});
 
 // 업로드된 NS 리스트
 adminRouter.get("/admin/audlab/nses", requireAdmin, (req, res) => {
@@ -1458,72 +1260,87 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
   });
 });
 
+
+// me & ping
+function meHandler(req, res) {
+  sendNoStore(res);
+  const base = statusPayload(req);
+  if (!base.authenticated) return res.json(base);
+
+  const u = getUserById(req.session.uid);
+
+  // display_name 컬럼이 있어도/없어도 안전하게 읽기
+  let displayName = null;
+  try {
+    const cols = db.prepare("PRAGMA table_info(users)").all().map(r => String(r.name));
+    if (cols.includes("display_name")) {
+      const r = db.prepare("SELECT display_name FROM users WHERE id=?").get(req.session.uid);
+      displayName = r?.display_name || null;
+    }
+  } catch {}
+
+  const avatarUrl = latestAvatarUrl(req.session.uid);
+
+  // ★ user 안과 top-level 둘 다 넣어 FE 호환 보장
+  const payload = {
+    ...base,
+    user: u ? { id: u.id, email: u.email, displayName } : null,
+    ns: String(req.session.uid),
+  };
+  if (u) {
+    payload.email = u.email;        // legacy FE 호환
+    payload.displayName = displayName;
+    payload.name = displayName;     // name 키로만 읽는 클라 대비
+    payload.avatarUrl = avatarUrl;
+  }
+  return res.json(payload);
+}
+
+app.get(["/auth/me", "/api/auth/me"], meHandler);
+
 // 경량 헬스체크
 app.get("/api/healthz", (_req, res) => {
   res.set("Cache-Control", "no-store");
   res.json({ ok: true, bootId: BOOT_ID });
 });
 
-// 세션/쿠키 스냅샷
-app.get('/debug/session', (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  res.json({
-    sid: req.sessionID || null,
-    uid: req.session?.uid ?? null,
-    hasSession: !!req.session,
-    cookie: req.session?.cookie ?? null
-  });
-});
-
-// 세션 저장 강제 테스트(쓰기 성공/실패 바로 확인)
-app.post('/debug/session-store', async (req, res) => {
-  try {
-    if (!req.session) return res.status(500).json({ ok:false, note:'no session object' });
-    const t = Date.now();
-    req.session.__probe = t;
-    req.session.save((err) => {
-      if (err) {
-        console.error('[SESSION-PROBE] save failed:', err?.message || err);
-        return res.status(500).json({ ok:false, error:'SAVE_FAILED', message: err?.message || String(err) });
-      }
-      res.json({ ok:true, wrote: t });
-    });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:'EX', message: e?.message || String(e) });
-  }
-});
-
-
 // ──────────────────────────────────────────────────────────
-// 이메일 NS 강제 상태 API
 app.get("/api/state", requireLogin, (req, res) => {
-  const emailNS = getNS(req);
-  if (!emailNS) return res.status(401).json({ ok:false });
-  const row = getStateByEmail(emailNS);
-  if (!row) return res.json({ ok: true, emailNS, state: null });
-  return res.json({ ok: true, emailNS, state: row.state, updatedAt: row.updatedAt });
+  const ns = String(req.query.ns || req.session.uid).toLowerCase();
+  const row = getUserState(req.session.uid, ns);      // { state, updatedAt } | null
+  if (!row) return res.json({ ok: true, state: null });
+  return res.json({ ok: true, state: row.state, updatedAt: row.updatedAt });
 });
 app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
-  const emailNS = getNS(req);
-  if (!emailNS) return res.status(401).json({ ok:false });
-  const state = req.body?.state ?? req.body ?? {};
+  const ns = String(req.body.ns || req.session.uid).toLowerCase();
+  const state = req.body.state || req.body; // store.js 폴백과 호환
   const updatedAt = Number(state?.updatedAt || Date.now());
-  putStateByEmail(emailNS, state, updatedAt);
-  return res.json({ ok: true, emailNS });
+  putUserState(req.session.uid, ns, state, updatedAt);
+  return res.json({ ok: true });
 });
 app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
-  const emailNS = getNS(req);
-  if (!emailNS) return res.status(401).json({ ok:false });
-  const state = req.body?.state ?? req.body ?? {};
+  const ns = String(req.body.ns || req.session.uid).toLowerCase();
+  const state = req.body.state || req.body; // store.js 폴백과 호환
   const updatedAt = Number(state?.updatedAt || Date.now());
-  putStateByEmail(emailNS, state, updatedAt);
-  return res.json({ ok: true, emailNS });
+  putUserState(req.session.uid, ns, state, updatedAt);
+  return res.json({ ok: true });
 });
+
 // ──────────────────────────────────────────────────────────
 // 소셜/피드 라우터(있으면 자동 장착) — 업로드/블랍보다 '위'
 // ──────────────────────────────────────────────────────────
 mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
+
+// audlab REST (submit/list) — routes are absolute (/api/audlab/*), so mount at root
+// audlab REST (submit/list) — /api 아래로만 마운트 (중복/경로 혼동 방지)
+try {
+  const audlabRouter = require(path.join(__dirname, "audlab-router"));
+  app.use("/api", audlabRouter);
+  console.log("[router] mounted audlab-router at /api");
+} catch (e) {
+  console.log("[router] audlab-router not found:", e?.message || e);
+}
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
 
@@ -1700,7 +1517,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const nsFilter    = String(req.query.ns || '').trim().toLowerCase();
         const labelFilter = String(req.query.label || '').trim();
 
-        const SKIP_DIRS = new Set(['avatars','audlab']); // 갤러리 외 디렉토리 제외
+        const SKIP_DIRS = new Set(['avatars']); // 아바타 폴더 제외
         // 1) ns 디렉토리 나열
         let nss = [];
         try {
@@ -1844,10 +1661,11 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if ((!it.user.avatarUrl   || it.user.avatarUrl   === null) && it.author?.avatarUrl)   it.user.avatarUrl   = it.author.avatarUrl;
 
           // 4) mine 플래그
-          it.mine = String(it.ns || '').toLowerCase() === String(getNS(req) || '').toLowerCase();
+          it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
 
           // 5) 알림 라우팅용: id -> owner ns 맵 업데이트
-          ITEM_OWNER_NS.set(String(it.id), String(it.ns));
+          if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
+          globalThis.ITEM_OWNER_NS.set(String(it.id), String(it.ns));
         }
 
         const next = (all.length > limit && slice.length)
@@ -1917,7 +1735,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const ns  = getNS(req);
         const label = String(req.body?.label || req.body?.choice || '').trim();
         if (!isVoteLabel(label)) return res.status(400).json({ ok:false, error:'bad-label' });
-        const prev = db.prepare('SELECT label FROM item_votes WHERE item_id=? AND user_id=?').get(id, uid)?.label || null;
+
         db.prepare(`
           INSERT INTO item_votes(item_id,user_id,label,created_at)
           VALUES(?,?,?,?)
@@ -1940,7 +1758,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         const label = String(req.body?.label || req.body?.choice || '').trim();
         if (!id) return res.status(400).json({ ok:false, error:'bad-item' });
         if (!isVoteLabel(label)) return res.status(400).json({ ok:false, error:'bad-label' });
-        const prev = db.prepare('SELECT label FROM item_votes WHERE item_id=? AND user_id=?').get(id, uid)?.label || null;
+
         db.prepare(`
           INSERT INTO item_votes(item_id,user_id,label,created_at)
           VALUES(?,?,?,?)
@@ -2162,7 +1980,8 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         if (!out.user?.avatarUrl   && out.author?.avatarUrl)   out.user.avatarUrl   = out.author.avatarUrl;
 
         // 5) 알림 라우팅용 맵 갱신
-        ITEM_OWNER_NS.set(String(out.id), ownerNs);
+        if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
+        globalThis.ITEM_OWNER_NS.set(String(out.id), ownerNs);
 
 
         res.set('Cache-Control', 'no-store');
@@ -2200,7 +2019,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
   upload.single("file"),
   (req, res) => {
     try {
-      const ns = getNS(req); // 이메일 네임스페이스
+      const ns = String(req.session.uid).toLowerCase();
       const {
         id = `g_${Date.now()}`,
         label = "",
@@ -2326,6 +2145,14 @@ function writeJsonAtomic(filePath, dataObj) {
   } catch { return false; }
 }
 
+// 내 계정에서 사용할 수 있는 모든 후보 NS (요청 ns, 내 uid, 내 email)
+function getMyNamespaces(req, preferNs) {
+  const uidNs   = String(req.session?.uid || '').toLowerCase();
+  const emailNs = String(getUserById(req.session?.uid || 0)?.email || '').toLowerCase();
+  const pref    = String(preferNs || '').toLowerCase();
+  return [...new Set([pref, uidNs, emailNs].filter(Boolean))];
+}
+
 // index/파일을 안전하게 삭제 (index에 없더라도 파일만 있으면 삭제 성공으로 간주)
 function removeItemFileAndIndexIn(ns, id) {
   try {
@@ -2436,15 +2263,18 @@ app.post('/api/delete', requireLogin, csrfProtection, (req, res) => {
 
 // 권한 체크: 요청 ns가 내 uid/email 변형 중 하나와 일치해야 함
 function ensureOwnerNs(req, ns) {
-  const email = getNS(req);
+  const uid   = String(req.session?.uid || '').toLowerCase();
+  const email = String(getUserById(req.session?.uid || 0)?.email || '').toLowerCase();
   ns = String(ns || '').toLowerCase();
-  return !!email && ns === email;
+  if (!ns) return false;
+  const variants = [uid, email, `user:${uid}`].filter(Boolean); // ★ email 변형의 user: 접두 삭제
+  return variants.includes(ns);
 }
 
 // ===== DEV-ONLY: migrate items from 'default' ns to current user's ns =====
 app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, res) => {
   try {
-    const myNs = getNS(req) || String(req.session.uid).toLowerCase();
+    const myNs = String(req.session.uid).toLowerCase();     // e.g. "2"
     const srcDir = path.join(UPLOAD_ROOT, 'default');
     const dstDir = path.join(UPLOAD_ROOT, myNs);
     ensureDir(dstDir);
@@ -2641,8 +2471,6 @@ function printRoutesSafe() {
 }
 
 // ──────────────────────────────────────────────────────────
-hardResetOnBoot();
-migrateEmailNsOnBoot();
 server.listen(PORT, () => {
   console.log(`listening: http://localhost:${PORT}`);
   if (!PROD) printRoutesSafe();
@@ -2658,5 +2486,4 @@ server.listen(PORT, () => {
   } catch (e) {
     console.log("[ble] bridge failed to start:", e?.message || e);
   }
-
 });
