@@ -2596,4 +2596,25 @@ app.get('/debug/session', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ sid: req.sessionID, uid: req.session?.uid ?? null, hasSession: !!req.session });
 });
+
+app.get('/debug/fs', (req, res) => {
+  const canW = (p) => { try { fs.accessSync(p, fs.constants.W_OK); return true; } catch { return false; } };
+  res.set('Cache-Control','no-store');
+  res.json({
+    DATA_DIR: EFFECTIVE_DATA_DIR,
+    SESSION_DB_PATH,
+    UPLOAD_ROOT,
+    exists: {
+      dataDir: fs.existsSync(EFFECTIVE_DATA_DIR),
+      sessDir: fs.existsSync(path.dirname(SESSION_DB_PATH)),
+      upload:  fs.existsSync(UPLOAD_ROOT),
+    },
+    writable: {
+      dataDir: canW(EFFECTIVE_DATA_DIR),
+      sessDir: canW(path.dirname(SESSION_DB_PATH)),
+      upload:  canW(UPLOAD_ROOT),
+    },
+  });
+});
+
 });
