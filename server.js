@@ -206,6 +206,34 @@ function resolvePushNS(ns) {
   }
   return raw;
 }
+// ── Allowed MIME lists (images & audio via dataURL) ─────────────────
+const ALLOWED_IMAGE_MIMES = new Set([
+  "image/png",
+  "image/jpeg", "image/jpg",
+  "image/webp",
+  "image/gif",
+]);
+
+const ALLOWED_AUDIO_MIMES = new Set([
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/ogg",
+  "audio/mpeg",  // mp3
+  "audio/wav",
+  "audio/x-wav",
+]);
+
+function isAllowedImageMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  const base = m.split(";")[0];
+  return ALLOWED_IMAGE_MIMES.has(m) || ALLOWED_IMAGE_MIMES.has(base);
+}
+function isAllowedAudioMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  const base = m.split(";")[0];
+  return ALLOWED_AUDIO_MIMES.has(m) || ALLOWED_AUDIO_MIMES.has(base);
+}
 
 // ──────────────────────────────────────────────────────────
 // 업로드 준비 (메모리 → 디스크 저장)
@@ -701,9 +729,14 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
 
     // 1) PNG 저장 (previewDataURL 필수)
     const decodedImg = decodeDataURL(req.body?.previewDataURL || req.body?.thumbDataURL || "");
-    if (!decodedImg || !/^image\//.test(decodedImg.mime)) {
-      return res.status(400).json({ ok:false, error:"bad_preview" });
+    if (!decodedImg || !/^image\//.test(decodedImg.mime) || !isAllowedImageMime(decodedImg.mime)) {
+      return res.status(400).json({ ok:false, error:"bad_preview_mime" });
     }
+    // (선택) dataURL 경로 용량 가드 — 8MB 정도 권장
+    if (decodedImg.buf.length > 8 * 1024 * 1024) {
+      return res.status(413).json({ ok:false, error:"image_too_large" });
+    }
+
     const imgExt  = decodedImg.ext || "png";
     const imgMime = decodedImg.mime || "image/png";
     fs.writeFileSync(path.join(dir, `${id}.${imgExt}`), decodedImg.buf);
@@ -714,16 +747,23 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
     if (req.body?.audioDataURL) {
       const decodedAud = decodeDataURL(req.body.audioDataURL);
       if (decodedAud && /^audio\//.test(decodedAud.mime)) {
+        // ★ 화이트리스트 체크
+        if (!isAllowedAudioMime(decodedAud.mime)) {
+          return res.status(400).json({ ok:false, error:"bad_audio_mime" });
+        }
+        // (선택) dataURL 경로 용량 가드 — 12MB 정도 권장
+        if (decodedAud.buf.length > 12 * 1024 * 1024) {
+          return res.status(413).json({ ok:false, error:"audio_too_large" });
+        }
         audioExt = decodedAud.ext || "webm";
         audioMime = decodedAud.mime || "audio/webm";
         fs.writeFileSync(path.join(dir, `${id}.${audioExt}`), decodedAud.buf);
       }
     }
 
-    // 3) 메타 JSON 저장
+    // 3) 메타 JSON 저장 (기존 그대로)
     const meta = {
-      id,
-      ns,
+      id, ns,
       width: Number(req.body?.width || 0),
       height: Number(req.body?.height || 0),
       strokes: Array.isArray(req.body?.strokes) ? req.body.strokes : [],
@@ -740,8 +780,7 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
 
     return res.json({
       ok: true,
-      id,
-      ns,
+      id, ns,
       json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
       image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
       ...(audioExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audioExt}` } : {}),
