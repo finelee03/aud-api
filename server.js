@@ -944,23 +944,174 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
   try {
     const ns = String(req.query.ns || "").trim();
     if (!ns) return res.status(400).json({ ok:false, error:"ns_required" });
-    const dir = path.join(AUDLAB_ROOT, nsSafe(ns));
+
+    const safeNs = nsSafe(ns);
+    const dir = path.join(AUDLAB_ROOT, safeNs);
     try { fs.mkdirSync(dir, { recursive:true }); } catch {}
-    const files = fs.readdirSync(dir).filter(f => /\.json$/i.test(f)).sort().reverse();
+
+    const files = fs.readdirSync(dir)
+      .filter(f => /\.json$/i.test(f))
+      .sort()
+      .reverse();
+
     const items = files.slice(0, 200).map(f => {
       const id = f.replace(/\.json$/i, "");
+
+      // 이미지/오디오 확장자 탐색
       const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
       const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]);
+
+      // ── user 메타 구성 ─────────────────────────────────────────
+      let user = null;
+      // 1) 메타(author) 우선
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(dir, `${id}.json`), "utf8"));
+        if (meta?.author) {
+          user = {
+            id: meta.author.id ?? null,
+            email: meta.author.email ?? null,
+            displayName: meta.author.displayName ?? null,
+            avatarUrl: meta.author.avatarUrl ?? null,
+          };
+        }
+      } catch { /* ignore broken meta */ }
+
+      // 2) 없으면 ns로 users 테이블 조회
+      if (!user) {
+        const nsNum = Number(ns);
+        if (Number.isFinite(nsNum)) {
+          try {
+            const row = getUserById(nsNum);
+            if (row) {
+              user = {
+                id: row.id,
+                email: row.email,
+                displayName: getDisplayNameById?.(row.id) || (row.email ? row.email.split("@")[0] : null),
+                avatarUrl: latestAvatarUrl?.(row.id) || null,
+              };
+            }
+          } catch { /* ignore */ }
+        }
+      }
+
+      // 3) 그래도 없으면 ns 자체를 id로 사용
+      if (!user) user = { id: ns, email: null, displayName: null, avatarUrl: null };
+      // ────────────────────────────────────────────────────────
+
       return {
         id,
-        json:  `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
-        image: `/uploads/audlab/${nsSafe(ns)}/${id}.${imgExt}`,
-        ...(audExt ? { audio: `/uploads/audlab/${nsSafe(ns)}/${id}.${audExt}` } : {})
+        json:  `/uploads/audlab/${safeNs}/${id}.json`,
+        image: `/uploads/audlab/${safeNs}/${id}.${imgExt}`,
+        ...(audExt ? { audio: `/uploads/audlab/${safeNs}/${id}.${audExt}` } : {}),
+        user, // ✅ 카드에서 item.user.id 사용 가능
       };
     });
+
     res.json({ ok:true, ns, items });
   } catch {
     res.status(500).json({ ok:false, error:"SERVER_ERROR" });
+  }
+});
+
+
+// ✅ 모든 NS의 제출물을 한 번에 가져오는 엔드포인트
+adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
+  try {
+    const EXT_IMG = ["png","jpg","jpeg","webp","gif"];
+    const EXT_AUD = ["webm","ogg","mp3","wav"];
+    const EXT_MIME = { png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", webp:"image/webp", gif:"image/gif" };
+
+    // audlab 루트 아래 디렉토리(ns) 나열
+    const nses = fs.readdirSync(AUDLAB_ROOT, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => decodeURIComponent(d.name))
+      .sort();
+
+    const items = [];
+
+    for (const ns of nses) {
+      const dir = path.join(AUDLAB_ROOT, encodeURIComponent(ns));
+
+      // 이 NS의 *.json 들만 긁어오기 (_index.json 제외)
+      const jsonFiles = fs.readdirSync(dir)
+        .filter(f => f.endsWith(".json") && f !== "_index.json");
+
+      for (const jf of jsonFiles) {
+        const id = jf.replace(/\.json$/i, "");
+        const jPath = path.join(dir, jf);
+
+        // 메타 로드 (없거나 깨져 있어도 넘어감)
+        let meta = null;
+        try { meta = JSON.parse(fs.readFileSync(jPath, "utf8")); } catch {}
+
+        // 이미지/오디오 확장자 탐색
+        const imgExt = findFirstExisting(dir, id, EXT_IMG) || meta?.ext || "png";
+        const audExt = findFirstExisting(dir, id, EXT_AUD) || meta?.audioExt || null;
+
+        // user 메타 구성: 우선순위 (meta.author -> users 테이블 -> ns 폴백)
+        let user = null;
+        if (meta?.author?.id || meta?.author?.email || meta?.author?.displayName) {
+          user = {
+            id: meta.author.id ?? null,
+            email: meta.author.email ?? null,
+            displayName: meta.author.displayName ?? null,
+            avatarUrl: meta.author.avatarUrl ?? null,
+          };
+        } else {
+          // ns가 숫자면 users에서 조회
+          const nsNum = Number(ns);
+          if (Number.isFinite(nsNum)) {
+            try {
+              const row = getUserById(nsNum);
+              if (row) {
+                user = {
+                  id: row.id,
+                  email: row.email,
+                  displayName: getDisplayNameById?.(row.id) || (row.email ? row.email.split("@")[0] : null),
+                  avatarUrl: latestAvatarUrl?.(row.id) || null,
+                };
+              }
+            } catch {}
+          }
+          // 그래도 없으면 ns 자체를 id로 노출
+          if (!user) user = { id: ns, email: null, displayName: null, avatarUrl: null };
+        }
+
+        // createdAt 보정
+        const createdAt = Number(meta?.createdAt ?? meta?.created_at ?? 0) ||
+                          (() => { try { return Math.floor(fs.statSync(jPath).mtimeMs); } catch { return Date.now(); } })();
+
+        items.push({
+          id,
+          ns,                         // 어떤 유저의 파일인지 식별용
+          createdAt,
+          width: Number(meta?.width || 0),
+          height: Number(meta?.height || 0),
+          label: String(meta?.label || ""),
+          caption: typeof meta?.caption === "string" ? meta.caption
+                 : (typeof meta?.text === "string" ? meta.text : ""),
+          bg: meta?.bg || meta?.bg_color || meta?.bgHex || null,
+          // 파일 URL들
+          json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
+          image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
+          ...(audExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audExt}` } : {}),
+          // 카드에 찍을 user
+          user,
+          // 편의
+          mime: EXT_MIME[imgExt] || meta?.mime || null,
+          audioExt: audExt || null,
+          accepted: !!meta?.accepted,   // 메타에 들어있는 경우 유지
+        });
+      }
+    }
+
+    // 최신순 정렬
+    items.sort((a,b) => (b.createdAt - a.createdAt) || (a.id < b.id ? 1 : -1));
+
+    return res.json({ ok: true, items });
+  } catch (e) {
+    console.log("[/admin/audlab/all] failed:", e?.message || e);
+    return res.status(500).json({ ok:false, error:"SERVER_ERROR" });
   }
 });
 
