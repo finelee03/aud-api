@@ -77,6 +77,13 @@ function findFirstExisting(dir, id, exts) {
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
 
+function getMyNamespaces(req, preferNs) {
+  const pref = String(preferNs || '').toLowerCase();     // 주로 이메일 NS
+  const emailNs = getNS(req);                            // 이메일 NS
+  const uidNs = String(req.session?.uid || '').trim();   // ← 레거시 숫자 uid 폴더
+  return [...new Set([pref, emailNs, uidNs].filter(Boolean))];
+}
+
 // 2) 부팅 시 조건부 마이그레이션 훅 추가 (hardResetOnBoot 호출 부근에 배치)
 function migrateEmailNsOnBoot() {
   // why: 운영에선 명시 opt-in, 개발에선 안전 기본 off
@@ -765,7 +772,7 @@ app.get("/auth/csrf", csrfProtection, (req, res) => {
 app.get("/auth/me", meHandler);
 
 // (선택) 과거 코드 호환용 별칭
-app.get("/api/users/me", meHandler);
+app.get("/api/me", meHandler);
 
 app.post("/auth/signup", csrfProtection, async (req, res) => {
   const parsed = EmailPw.safeParse(req.body);
@@ -2372,7 +2379,7 @@ function ensureOwnerNs(req, ns) {
 // ===== DEV-ONLY: migrate items from 'default' ns to current user's ns =====
 app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, res) => {
   try {
-    const myNs = String(req.session.uid).toLowerCase();     // e.g. "2"
+    const myNs = getNS(req) || String(req.session.uid).toLowerCase();
     const srcDir = path.join(UPLOAD_ROOT, 'default');
     const dstDir = path.join(UPLOAD_ROOT, myNs);
     ensureDir(dstDir);
