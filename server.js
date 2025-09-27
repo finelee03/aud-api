@@ -192,12 +192,6 @@ function meHandler(req, res) {
   return res.json(payload);
 }
 
-// 🔧 NEW: 클라 호환을 위한 GET 엔드포인트 추가
-app.get("/auth/me", meHandler);
-
-// (선택) 과거 코드 호환용 별칭
-app.get("/api/users/me", meHandler);
-
 /** 계정 삭제 공통 처리 */
 function deleteMyAccount(req, res) {
   if (!req.session?.uid) return res.status(401).json({ ok:false });
@@ -755,6 +749,12 @@ app.get("/auth/ping", (req, res) => {
 app.get("/auth/csrf", csrfProtection, (req, res) => {
   return res.json({ csrfToken: req.csrfToken() });
 });
+
+// 🔧 NEW: 클라 호환을 위한 GET 엔드포인트 추가
+app.get("/auth/me", meHandler);
+
+// (선택) 과거 코드 호환용 별칭
+app.get("/api/users/me", meHandler);
 
 app.post("/auth/signup", csrfProtection, async (req, res) => {
   const parsed = EmailPw.safeParse(req.body);
