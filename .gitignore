@@ -7,3 +7,12 @@ uploads
 
 # local sqlite artifacts
 data/*.sqlite*
+
+sessions.sqlite
+uploads/
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
