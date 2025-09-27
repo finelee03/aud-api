@@ -19,6 +19,12 @@ const compression = require("compression");
 const sharp = require("sharp");
 require("dotenv").config();
 
+const DATA_DIR =
+  process.env.DATA_DIR ||
+  process.env.RENDER_DISK_PATH ||          // (선택) 직접 주입한 디스크 경로
+  (fs.existsSync("/var/data") ? "/var/data" : "/tmp"); // Render 디스크 없으면 /tmp
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+
 // === Admin config & seeding ===
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "finelee03@naver.com")
   .split(",").map(s => String(s || "").trim().toLowerCase()).filter(Boolean);
@@ -58,9 +64,6 @@ try {
 } catch {
   // optional module
 }
-
-const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
-fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
 function findFirstExisting(dir, id, exts) {
   for (const e of exts) {
@@ -120,8 +123,7 @@ function hardResetOnBoot() {
     try { rmrfSafe(USER_AUDLAB_ROOT); fs.mkdirSync(USER_AUDLAB_ROOT, { recursive:true }); } catch {}
     // 3) 세션 저장소도 날려서 모든 로그인 무효화
     try {
-      const p = path.join(__dirname, 'sessions.sqlite');
-      if (fs.existsSync(p)) fs.rmSync(p, { force:true });
+      if (fs.existsSync(SESSION_DB_PATH)) fs.rmSync(SESSION_DB_PATH, { force:true });
     } catch {}
     console.log('[BOOT] hard reset done.');
   } catch (e) {
@@ -209,8 +211,17 @@ function deleteMyAccount(req, res) {
   return req.session ? req.session.destroy(done) : done();
 }
 
-const USER_AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
+// ── Writable upload roots (moved off read-only app dir) ─────────────
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(DATA_DIR, "uploads");
+try { fs.mkdirSync(UPLOAD_ROOT, { recursive: true }); } catch {}
+process.env.UPLOAD_ROOT = UPLOAD_ROOT; // 하위 라우터/모듈과 공유
+
+const AVATAR_DIR = path.join(UPLOAD_ROOT, "avatars");
+try { fs.mkdirSync(AVATAR_DIR, { recursive: true }); } catch {}
+
+const USER_AUDLAB_ROOT = path.join(UPLOAD_ROOT, "audlab");
 try { fs.mkdirSync(USER_AUDLAB_ROOT, { recursive: true }); } catch {}
+
 
 const BOOT_ID = uuid();
 const app = express();
@@ -341,9 +352,6 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
 });
-const UPLOAD_ROOT = path.join(__dirname, "public", "uploads");
-// 서브 라우터들이 동일 경로를 쓰도록 환경변수로 공유
-process.env.UPLOAD_ROOT = process.env.UPLOAD_ROOT || UPLOAD_ROOT;
 // 파일시스템 기반 퍼블릭 피드 폴백 라우트를 항상 장착
 process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
 process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
@@ -466,7 +474,10 @@ app.use(compression({
 
 // 세션
 const SqliteStore = SqliteStoreFactory(session);
-const sessionDB = new Sqlite(path.join(__dirname, "sessions.sqlite"));
+const SESSION_DB_PATH =
+  process.env.SESSION_DB_PATH ||
+  path.join(DATA_DIR, "sessions.sqlite");
+const sessionDB = new Sqlite(SESSION_DB_PATH);
 const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;        // 7일(ms)
 const MAX_AGE_SEC = Math.floor(MAX_AGE_MS / 1000); // 7일(sec)
 
@@ -1054,17 +1065,16 @@ app.post(
   }
 );
 
-app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
+app.use("/uploads", express.static(UPLOAD_ROOT, {
   setHeaders(res){
-    res.set("Accept-Ranges", "bytes");                  // ★ 오디오 시킹/부분요청
+    res.set("Accept-Ranges", "bytes");
     res.set("Cache-Control", "public, max-age=31536000, immutable");
   }
 }));
 
 // === Admin-only endpoints (audlab) ===
 const adminRouter = express.Router();
-const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
-try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
+const AUDLAB_ROOT = USER_AUDLAB_ROOT; // 동일 루트 사용
 
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
 
