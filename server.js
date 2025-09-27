@@ -925,11 +925,10 @@ app.post(
   }
 );
 
-
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
   setHeaders(res){
+    res.set("Accept-Ranges", "bytes");                  // ★ 오디오 시킹/부분요청
     res.set("Cache-Control", "public, max-age=31536000, immutable");
-    res.set("Accept-Ranges", "bytes"); // why: 오디오 탐색/부분 요청 부드럽게
   }
 }));
 

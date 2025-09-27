@@ -1,90 +1,71 @@
-// FILE: audlab-router.js (place next to server.js, exports an express router)
+// REPLACE WHOLE FILE: audlab-router.js
 const path = require("path");
 const fs = require("fs");
 const express = require("express");
-
 const router = express.Router();
 
-// Share helpers from server if available, else fallback
 function ensureDir(dir){ try{ fs.mkdirSync(dir, { recursive:true }); } catch {} }
-function decodeDataURL(dataURL) {
-  const m = String(dataURL || "").match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+function decodeAnyDataURL(dataURL) {
+  const m = String(dataURL || "").match(/^data:([a-z0-9.+/-]+);base64,(.+)$/i);
   if (!m) return null;
-  const mime = m[1];
-  const buf = Buffer.from(m[2], "base64");
-  let ext = "png";
-  if (/jpe?g/i.test(mime)) ext = "jpg";
-  else if (/webp/i.test(mime)) ext = "webp";
-  else if (/gif/i.test(mime)) ext = "gif";
-  else if (/png/i.test(mime)) ext = "png";
+  const mime = m[1].toLowerCase();
+  const buf  = Buffer.from(m[2], "base64");
+  const map = {
+    "image/png":"png","image/jpeg":"jpg","image/jpg":"jpg","image/webp":"webp","image/gif":"gif",
+    "audio/webm;codecs=opus":"webm","audio/webm":"webm","audio/ogg;codecs=opus":"ogg","audio/ogg":"ogg",
+    "audio/mpeg":"mp3","audio/wav":"wav","audio/x-wav":"wav","audio/mp4":"m4a","audio/aac":"m4a",
+  };
+  const base = mime.split(";")[0];
+  const ext = map[mime] || map[base] || (base.startsWith("image/")||base.startsWith("audio/")? base.split("/")[1] : "bin");
   return { mime, buf, ext };
 }
+function requireLogin(req,res,next){ if (req.session?.uid) return next(); res.status(401).json({ ok:false, error:"auth_required" }); }
 
-// simple auth guard (mirror server.js style)
-function requireLogin(req, res, next){
-  if (req.session?.uid) return next();
-  return res.status(401).json({ ok:false, error:"auth_required" });
-}
+const ROOT = path.join(__dirname, "public", "uploads", "audlab"); ensureDir(ROOT);
+const getNS = (req) => {
+  const s = String(req.body?.ns || req.query?.ns || req.session?.uid || "default").trim().toLowerCase();
+  if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(s)) return s;
+  if (/^[a-z0-9_-]{1,64}$/.test(s)) return s;
+  return "default";
+};
 
-// Paths
-const PUB = path.join(__dirname, "public");
-const ROOT = path.join(PUB, "uploads", "audlab");
-ensureDir(ROOT);
-
-// Limits
-const MAX_STROKES = 400;
-const MAX_POINTS = 8000;
-const MAX_PNG_BYTES = 5 * 1024 * 1024;
-
-function getNS(req){
-  const norm = (s='') => String(s).trim().toLowerCase();
-  const raw = norm(req.body?.ns || req.query?.ns || '');
-  if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(raw)) return raw;
-  if (/^[a-z0-9_-]{1,64}$/.test(raw)) return raw;
-  return norm(req.session?.uid || 'default');
-}
-
-// POST /api/audlab/submit
-router.post("/api/audlab/submit", requireLogin, express.json({ limit: "7mb" }), (req, res)=>{
+router.post("/api/audlab/submit", requireLogin, express.json({ limit: "30mb" }), (req, res) => {
   try {
     const ns = getNS(req);
-    const { width, height, strokes = [], previewDataURL } = req.body || {};
-    // validate strokes
-    if (!Array.isArray(strokes) || strokes.length === 0) {
-      return res.status(400).json({ ok:false, error:"NO_STROKES" });
-    }
-    const strokeCount = strokes.length;
-    const pointCount = strokes.reduce((s, st)=> s + (Array.isArray(st.points)? st.points.length : 0), 0);
-    if (strokeCount > MAX_STROKES) return res.status(400).json({ ok:false, error:"TOO_MANY_STROKES" });
-    if (pointCount > MAX_POINTS) return res.status(400).json({ ok:false, error:"TOO_MANY_POINTS" });
+    const { width, height, strokes = [], previewDataURL, audioDataURL } = req.body || {};
+    if (!Array.isArray(strokes) || strokes.length === 0) return res.status(400).json({ ok:false, error:"NO_STROKES" });
 
-    const id = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2,8);
+    const id  = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2,8);
     const dir = path.join(ROOT, encodeURIComponent(ns));
     ensureDir(dir);
 
-    // save JSON
-    const jsonPath = path.join(dir, `${id}.json`);
-    const payload = { ns, width, height, strokeCount, pointCount, strokes };
-    fs.writeFileSync(jsonPath, JSON.stringify(payload, null, 2), "utf8");
+    const meta = { ns, width, height, strokeCount: strokes.length, pointCount: strokes.reduce((s, st)=> s + (Array.isArray(st.points)? st.points.length : 0), 0), strokes };
+    fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(meta, null, 2), "utf8");
 
-    // preview image
     let pngUrl = null;
     if (previewDataURL) {
-      const dec = decodeDataURL(previewDataURL);
-      if (!dec) return res.status(400).json({ ok:false, error:"BAD_DATAURL" });
-      if (dec.buf.length > MAX_PNG_BYTES) return res.status(400).json({ ok:false, error:"PNG_TOO_LARGE" });
-      const imgPath = path.join(dir, `${id}.png`);
-      fs.writeFileSync(imgPath, dec.buf);
+      const dec = decodeAnyDataURL(previewDataURL);
+      if (!dec || !/^image\//.test(dec.mime)) return res.status(400).json({ ok:false, error:"BAD_PREVIEW_DATAURL" });
+      fs.writeFileSync(path.join(dir, `${id}.png`), dec.buf);
       pngUrl = `/uploads/audlab/${encodeURIComponent(ns)}/${id}.png`;
     }
 
-    return res.status(201).json({ ok:true, id, json: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`, png: pngUrl });
+    let audUrl = null;
+    if (audioDataURL) {
+      const dec = decodeAnyDataURL(audioDataURL);
+      if (dec && /^audio\//.test(dec.mime)) {
+        const p = path.join(dir, `${id}.${dec.ext}`);
+        fs.writeFileSync(p, dec.buf);
+        audUrl = `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${dec.ext}`;
+      }
+    }
+
+    return res.status(201).json({ ok:true, id, json:`/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`, png: pngUrl, audio: audUrl });
   } catch (e) {
-    return res.status(500).json({ ok:false, error: "SERVER_ERROR" });
+    return res.status(500).json({ ok:false, error:"SERVER_ERROR" });
   }
 });
 
-// GET /api/audlab/list?ns=...
 router.get("/api/audlab/list", requireLogin, (req, res)=>{
   try {
     const ns = getNS(req);
@@ -93,16 +74,16 @@ router.get("/api/audlab/list", requireLogin, (req, res)=>{
     const files = fs.readdirSync(dir).filter(f=>/\.json$/i.test(f)).sort().reverse();
     const out = files.slice(0, 50).map(f=>{
       const id = f.replace(/\.json$/i, "");
+      const audio = ["webm","ogg","m4a","mp3","wav"].map(ext => fs.existsSync(path.join(dir, `${id}.${ext}`)) ? `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${ext}` : null).find(Boolean) || null;
       return {
         id,
         json: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
         png:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.png`,
+        audio
       };
     });
     res.json({ ok:true, items: out });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:"SERVER_ERROR" });
-  }
+  } catch (e) { res.status(500).json({ ok:false, error:"SERVER_ERROR" }); }
 });
 
 module.exports = router;
