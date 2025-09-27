@@ -76,24 +76,6 @@ const BOOT_ID = uuid();
 const app = express();
 app.set('trust proxy', 1);
 
-// === FORCE CORS (hotfix) ===
-app.use((req, res, next) => {
-  const RAW = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || process.env.WEB_ORIGIN || "https://finelee03.github.io").split(",");
-  const ALLOWED = RAW.map(s => String(s||"").trim().replace(/\/$/, "").toLowerCase()).filter(Boolean);
-  const origin = String(req.headers.origin || "").trim().replace(/\/$/, "").toLowerCase();
-  const ok = !ALLOWED.length || ALLOWED.includes(origin);
-  if (ok && origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, x-csrf-token, X-XSRF-Token, x-xsrf-token, Authorization");
-    res.setHeader("Access-Control-Max-Age", "86400");
-  }
-  if (req.method === "OPTIONS") { res.status(204).end(); return; }
-  next();
-});
-
 function ensureUserAudlabDir(req) {
   const ns = String(req.session?.uid || "").toLowerCase(); // 숫자 uid(ns)
   if (!ns) return null;
@@ -101,31 +83,6 @@ function ensureUserAudlabDir(req) {
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   return { ns, dir };
 }
-
-// === [PATCH] Always-on CORS headers (before any routes) ===
-(function applyAlwaysOnCORS(app){
-  try {
-    const RAW = (process.env.ALLOWED_ORIGINS || process.env.WEB_ORIGIN || "").split(",").map(s => String(s||"").trim());
-    const ALLOWED = RAW.map(s => s.replace(/\/$/, "").toLowerCase()).filter(Boolean);
-    const ENABLED = (process.env.CROSS_SITE === "1" || process.env.ALLOW_CROSS_SITE === "1");
-    if (!ENABLED) return;
-    app.use((req, res, next) => {
-      const origin = String(req.headers.origin || "").replace(/\/$/, "").toLowerCase();
-      const ok = !ALLOWED.length || ALLOWED.includes(origin);
-      if (ok && origin) {
-        res.setHeader("Access-Control-Allow-Origin", origin);
-        res.setHeader("Vary", "Origin");
-        res.setHeader("Access-Control-Allow-Credentials", "true");
-        res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, x-csrf-token, X-XSRF-Token, x-xsrf-token, Authorization");
-        res.setHeader("Access-Control-Max-Age", "86400");
-      }
-      if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
-      next();
-    });
-  } catch {}
-})(app);
-
 
 const server = http.createServer(app);
 
@@ -312,7 +269,6 @@ function getNS(req) {
 // ──────────────────────────────────────────────────────────
 // 보안/미들웨어
 // ──────────────────────────────────────────────────────────
-app.set("trust proxy", 1);
 app.disable("x-powered-by");
 
 // ── CORS (교차 출처 프런트 허용) ───────────────────────────────
@@ -343,8 +299,16 @@ app.use(
         "style-src-elem": ["'self'", "https://fonts.googleapis.com"],
         "font-src": ["'self'", "https://fonts.gstatic.com", "data:"],
         "connect-src": connectSrc,
-        "img-src": ["'self'", "data:", "blob:", (process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean)],
-        "media-src": ["'self'", "data:", "blob:", (process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean)],
+        "img-src": [
+          "'self'", "data:", "blob:",
+          ...((process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "")
+              .split(",").map(s => s.trim()).filter(Boolean))
+        ],
+        "media-src": [
+          "'self'", "data:", "blob:",
+          ...((process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "")
+              .split(",").map(s => s.trim()).filter(Boolean))
+        ],
         "worker-src": ["'self'", "blob:"],
       },
     },
@@ -1331,16 +1295,6 @@ app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
 // ──────────────────────────────────────────────────────────
 mountIfExists("./routes/gallery.public");   // GET /api/gallery/public, /api/gallery/:id/blob (visibility-aware)
 mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
-
-// audlab REST (submit/list) — routes are absolute (/api/audlab/*), so mount at root
-// audlab REST (submit/list) — /api 아래로만 마운트 (중복/경로 혼동 방지)
-try {
-  const audlabRouter = require(path.join(__dirname, "audlab-router"));
-  app.use("/api", audlabRouter);
-  console.log("[router] mounted audlab-router at /api");
-} catch (e) {
-  console.log("[router] audlab-router not found:", e?.message || e);
-}
 
 // ===== 폴백 소셜 라우트 설치 (mountIfExists 뒤, csrf/UPLOAD_ROOT 이후) =====
 
