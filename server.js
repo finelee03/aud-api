@@ -111,21 +111,57 @@ function purgeAllUserData(uid) {
   if (!uid) return;
   try {
     let email = null;
-    try { email = String(getUserEmailById(uid) || '').toLowerCase(); } catch {}ㄴ
-    // 1) 상태/소셜/좋아요 등 레코드 제거(테이블은 환경마다 다를 수 있으므로 try/catch 다중 시도)
+    try { email = String(getUserEmailById(uid) || '').toLowerCase(); } catch {}
+    // 1) 상태/소셜/좋아요 등 레코드 제거
     try { db.prepare('DELETE FROM user_states WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM item_likes  WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM item_votes  WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM items       WHERE user_id=?').run(uid); } catch {}
     try { db.prepare('DELETE FROM avatars     WHERE user_id=?').run(uid); } catch {}
-    // 파일시스템(업로드/오디오랩) — uid 폴더(과거 호환) + 이메일 폴더 모두 정리
+
+    // 2) 파일 시스템(업로드/오디오랩)
     try { rmrfSafe(path.join(UPLOAD_ROOT, String(uid))); } catch {}
     if (email) {
       try { rmrfSafe(path.join(UPLOAD_ROOT, encodeURIComponent(email))); } catch {}
       try { rmrfSafe(path.join(USER_AUDLAB_ROOT, encodeURIComponent(email))); } catch {}
     }
-    // 아바타는 uid-타임스탬프 파일이므로 uid 기준으로만 정리되면 충분
   } catch {}
+}
+
+// 2) /auth/me 응답에 emailNS 추가(레거시 ns=uid는 유지)
+function meHandler(req, res) {
+  sendNoStore(res);
+  const base = statusPayload(req);
+  if (!base.authenticated) return res.json(base);
+
+  const u = getUserById(req.session.uid);
+
+  // display_name 안전 조회
+  let displayName = null;
+  try {
+    const cols = db.prepare("PRAGMA table_info(users)").all().map(r => String(r.name));
+    if (cols.includes("display_name")) {
+      const r = db.prepare("SELECT display_name FROM users WHERE id=?").get(req.session.uid);
+      displayName = r?.display_name || null;
+    }
+  } catch {}
+
+  const avatarUrl = latestAvatarUrl(req.session.uid);
+  const emailNS = getNS(req); // ← 이메일 기반 NS (서버가 강제)
+
+  const payload = {
+    ...base,
+    user: u ? { id: u.id, email: u.email, displayName } : null,
+    ns: String(req.session.uid),            // 레거시(FE가 uid를 기대하던 경우)
+    emailNS,                                // ✅ 신규: FE는 이 값을 실제 NS로 사용
+  };
+  if (u) {
+    payload.email = u.email;
+    payload.displayName = displayName;
+    payload.name = displayName;
+    payload.avatarUrl = avatarUrl;
+  }
+  return res.json(payload);
 }
 
 /** 계정 삭제 공통 처리 */
