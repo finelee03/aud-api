@@ -60,6 +60,10 @@ fs.mkdirSync(AVATAR_DIR, { recursive: true });
 // ──────────────────────────────────────────────────────────
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
+
+const USER_AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
+try { fs.mkdirSync(USER_AUDLAB_ROOT, { recursive: true }); } catch {}
+
 const BOOT_ID = uuid();
 const app = express();
 app.set('trust proxy', 1);
@@ -81,6 +85,14 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   next();
 });
+
+function ensureUserAudlabDir(req) {
+  const ns = String(req.session?.uid || "").toLowerCase(); // 숫자 uid(ns)
+  if (!ns) return null;
+  const dir = path.join(USER_AUDLAB_ROOT, encodeURIComponent(ns));
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return { ns, dir };
+}
 
 // === [PATCH] Always-on CORS headers (before any routes) ===
 (function applyAlwaysOnCORS(app){
@@ -648,7 +660,77 @@ app.post("/auth/logout-beacon", (req, res) => {
     res.json({ ok: true });
   });
 });
+app.post("/api/audlab/submit", requireLogin, async (req, res) => {
+  try {
+    const slot = ensureUserAudlabDir(req);
+    if (!slot) return res.status(400).json({ ok:false, error:"ns_unavailable" });
 
+    const { ns, dir } = slot;
+    const id = `lab_${Date.now()}`;
+
+    // JSON 저장
+    const meta = {
+      id,
+      ns,
+      width: Number(req.body?.width || 0),
+      height: Number(req.body?.height || 0),
+      strokes: Array.isArray(req.body?.strokes) ? req.body.strokes : [],
+      // 업로드 시점의 작성자 메타(갤러리와 맞춤)
+      author: (() => {
+        const u = getUserById(req.session.uid);
+        return u ? { id: u.id, email: u.email, displayName: getDisplayNameById(u.id), avatarUrl: latestAvatarUrl(u.id) } : null;
+      })(),
+      createdAt: Date.now(),
+      ext: "png",
+      mime: "image/png",
+    };
+    fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(meta));
+
+    // PNG 저장 (dataURL 필수)
+    const decoded = decodeDataURL(req.body?.previewDataURL || req.body?.thumbDataURL || "");
+    if (!decoded) return res.status(400).json({ ok:false, error:"bad_preview" });
+    fs.writeFileSync(path.join(dir, `${id}.png`), decoded.buf);
+
+    return res.json({
+      ok: true,
+      id,
+      ns,
+      json: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
+      png:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.png`,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:"submit_failed" });
+  }
+});
+
+/**
+ * GET /api/audlab/list
+ * 현재 로그인 사용자의 NS에서 최근 제출물 목록을 반환
+ * 응답: { items: [{id,json,png}], ns }
+ */
+app.get("/api/audlab/list", requireLogin, (req, res) => {
+  try {
+    const slot = ensureUserAudlabDir(req);
+    if (!slot) return res.status(400).json({ ok:false, error:"ns_unavailable" });
+    const { ns, dir } = slot;
+
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+    const ids = files.filter(f => f.endsWith(".json")).map(f => f.replace(/\.json$/,""));
+
+    // 최신순
+    ids.sort((a,b) => (b > a ? 1 : -1));
+
+    const items = ids.slice(0, 200).map(id => ({
+      id,
+      json: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
+      png:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.png`,
+    }));
+
+    return res.json({ ok:true, ns, items });
+  } catch {
+    return res.status(500).json({ ok:false, error:"list_failed" });
+  }
+});
 // ──────────────────────────────────────────────────────────
 // Public profile endpoint
 // ──────────────────────────────────────────────────────────
