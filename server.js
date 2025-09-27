@@ -58,17 +58,7 @@ const {
   deleteAllStatesForEmail,   // [ADD]
 } = require("./db");
 
- // ble-bridge: 선택적 로딩 (없어도 빌드/실행 가능)
- let startBleBridge = null;
- try {
-   ({ startBleBridge } = require("./ble-bridge"));
- } catch (e) {
-   if (e && e.code !== "MODULE_NOT_FOUND") {
-     console.warn("[ble] optional require failed:", e?.message || e);
-   } else {
-     console.log("[ble] module not present (optional)");
-   }
- }
+const { startBleBridge } = require("./ble-bridge");
 
 const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
@@ -2293,15 +2283,11 @@ server.listen(PORT, () => {
   })();
 
   try {
-    const truthy = /^(1|true|yes|on)$/i;
-    const BLE_ENABLED = truthy.test(process.env.BLE_ENABLED || "");
-    if (BLE_ENABLED && typeof startBleBridge === "function") {
+    if (typeof startBleBridge === "function") {
       startBleBridge(io, { companyIdLE: 0xFFFF, log: true });
       console.log("[ble] bridge started");
-    } else if (BLE_ENABLED) {
-      console.log("[ble] not started: startBleBridge not available");
     } else {
-      console.log("[ble] disabled (set BLE_ENABLED=1 to enable)");
+      console.log("[ble] startBleBridge not available");
     }
   } catch (e) {
     console.log("[ble] bridge failed to start:", e?.message || e);
