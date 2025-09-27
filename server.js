@@ -42,7 +42,6 @@ async function seedAdminUsers() {
     console.warn("[admin] seed failed:", e?.message || e);
   }
 }
-seedAdminUsers(); // fire-and-forget
 
 const { db,                      // better-sqlite3 handle
   createUser,
@@ -50,6 +49,8 @@ const { db,                      // better-sqlite3 handle
   getUserById,
   getUserState,
   putUserState, } = require("./db");
+
+  seedAdminUsers();
 
 const { startBleBridge } = require("./ble-bridge");
 
