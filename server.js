@@ -887,6 +887,7 @@ app.post(
       if (decoded && decoded.buf.length > 8 * 1024 * 1024) {
         return res.status(413).json({ ok:false, msg:"image_too_large" });
       }
+      if (decoded) { buf = decoded.buf; }
     }
 
     if (!buf) return res.status(400).json({ ok:false, msg:"파일이 없습니다." });
@@ -1851,7 +1852,7 @@ app.post(["/api/gallery/upload", "/api/gallery"],
 
       if (!fileBuf) return res.status(400).json({ ok: false, error: "no-image" });
 
-      const filename = `${safeId}.${ext}`;
+      const filename = `${id}.${ext}`;
       const outPath  = path.join(dir, filename);
       // 최종 경로가 dir 내부인지 확인(더블 세이프가드)
       if (!outPath.startsWith(dir + path.sep)) {
