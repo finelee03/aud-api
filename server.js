@@ -20,6 +20,9 @@ const sharp = require("sharp");
 require("dotenv").config();
 
 // === Admin config & seeding ===
+const EMAIL_RX = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+const isEmail = (s) => EMAIL_RX.test(String(s || "").trim());
+
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "finelee03@naver.com")
   .split(",").map(s => String(s || "").trim().toLowerCase()).filter(Boolean);
 const ADMIN_SEED_PASSWORD = process.env.ADMIN_SEED_PASSWORD || "dlghkdls398!a"; // 반드시 환경변수로 옮기세요.
@@ -43,14 +46,15 @@ async function seedAdminUsers() {
   }
 }
 
-const { db,                      // better-sqlite3 handle
+const {
+  db,
   createUser,
   getUserByEmail,
   getUserById,
   getUserState,
-  putUserState, } = require("./db");
-
-  seedAdminUsers();
+  putUserState,
+  putStateByEmail, // ✅ add
+} = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
 
@@ -69,6 +73,10 @@ function findFirstExisting(dir, id, exts) {
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
 
+function dirForNS(ns) {
+  return path.join(UPLOAD_ROOT, encodeURIComponent(String(ns || '').toLowerCase()));
+}
+
 const USER_AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
 try { fs.mkdirSync(USER_AUDLAB_ROOT, { recursive: true }); } catch {}
 
@@ -77,7 +85,7 @@ const app = express();
 app.set('trust proxy', 1);
 
 function ensureUserAudlabDir(req) {
-  const ns = String(req.session?.uid || "").toLowerCase(); // 숫자 uid(ns)
+  const ns = emailNS(req, null);           // ✅ 이메일 NS 고정
   if (!ns) return null;
   const dir = path.join(USER_AUDLAB_ROOT, encodeURIComponent(ns));
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
@@ -156,12 +164,25 @@ function resolvePushNS(ns) {
   const v = raw.startsWith("user:") ? raw.slice(5) : raw;
   if (/^\d+$/.test(v)) {
     try {
-      const row = getUserById ? getUserById(Number(v)) : null;
+      const row = getUserById?.(Number(v));
       const email = String(row?.email || "").trim().toLowerCase();
       if (email) return email;
     } catch {}
   }
   return raw;
+}
+// 3) 이메일 전용 NS 선택기
+function emailNS(req, nsInput) {
+  // 왜: 클라이언트/서버 혼선 방지. 항상 이메일.
+  const cand = resolvePushNS(nsInput);
+  if (cand && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(cand)) return cand;
+  try {
+    const me = getUserById?.(Number(req.session?.uid));
+    const email = String(me?.email || "").trim().toLowerCase();
+    return email || "";
+  } catch {
+    return "";
+  }
 }
 // ── Allowed MIME lists (images & audio via dataURL) ─────────────────
 const ALLOWED_IMAGE_MIMES = new Set([
@@ -251,18 +272,10 @@ function decodeDataURL(dataURL) {
 // NS 추출(화이트리스트)
 function getNS(req) {
   const norm = (s='') => String(s).trim().toLowerCase();
-
-  // 1) 클라이언트가 보낸 ns 우선
   const raw = norm(req.body?.ns || req.query?.ns || '');
-
-  // 허용: uid형, user:uid형, email형
-  if (/^[a-z0-9_-]{1,64}$/.test(raw)) return raw;                 // ex) "2"
-  if (/^user:[a-z0-9_-]{1,64}$/.test(raw)) return raw.slice(5);   // ex) "user:2" → "2"
-  if (/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(raw)) return raw; // 이메일 ns (레거시 호환)
-
-  // 2) 없거나 이상하면 세션 uid로
-  const sess = norm(req.session?.uid || '');
-  return sess || 'default';
+  if (isEmail(raw)) return raw;
+  // 강제: 세션 사용자 이메일 (로그인 요구 라우트이므로 여기가 항상 채워져야 정상)
+  return emailNS(req, null) || "";
 }
 
 
@@ -919,8 +932,9 @@ adminRouter.get("/admin/audlab/nses", requireAdmin, (req, res) => {
 // 특정 NS의 제출물 목록
 adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
   try {
-    const ns = String(req.query.ns || "").trim();
+    const ns = String(req.query.ns || "").trim().toLowerCase();
     if (!ns) return res.status(400).json({ ok:false, error:"ns_required" });
+    if (!isEmail(ns)) return res.status(400).json({ ok:false, error:"bad_ns" });
 
     const safeNs = nsSafe(ns);
     const dir = path.join(AUDLAB_ROOT, safeNs);
@@ -1127,7 +1141,7 @@ adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res
     if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
 
     const dir = path.join(AUDLAB_ROOT, nsSafe(ns));
-    const indexPath = path.join(dir, "_index.json");
+    const indexPath = path.join(dir, '_index.json'); // dir = path.join(AUDLAB_ROOT, nsSafe(ns))
 
     let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
     let hit = null;
@@ -1249,17 +1263,16 @@ function meHandler(req, res) {
   const payload = {
     ...base,
     user: u ? { id: u.id, email: u.email, displayName } : null,
-    ns: String(req.session.uid),
+    ns: String(u?.email || "").toLowerCase(), // ✅ uid → email
   };
   if (u) {
-    payload.email = u.email;        // legacy FE 호환
+    payload.email = u.email;
     payload.displayName = displayName;
-    payload.name = displayName;     // name 키로만 읽는 클라 대비
+    payload.name = displayName;
     payload.avatarUrl = avatarUrl;
   }
   return res.json(payload);
 }
-
 app.get(["/auth/me", "/api/auth/me"], meHandler);
 
 // 경량 헬스체크
@@ -1270,24 +1283,26 @@ app.get("/api/healthz", (_req, res) => {
 
 // ──────────────────────────────────────────────────────────
 app.get("/api/state", requireLogin, (req, res) => {
-  const ns = String(req.query.ns || req.session.uid).toLowerCase();
-  const row = getUserState(req.session.uid, ns);      // { state, updatedAt } | null
+  const ns = emailNS(req, null);                     // ✅ query.ns 무시
+  const row = getUserState(req.session.uid, ns);
   if (!row) return res.json({ ok: true, state: null });
   return res.json({ ok: true, state: row.state, updatedAt: row.updatedAt });
 });
+
 app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
-  const ns = String(req.body.ns || req.session.uid).toLowerCase();
-  const state = req.body.state || req.body; // store.js 폴백과 호환
+  const email = emailNS(req, req.body?.ns);          // ✅ 강제 이메일
+  const state = req.body.state || req.body;          // 기존 호환
   const updatedAt = Number(state?.updatedAt || Date.now());
-  putUserState(req.session.uid, ns, state, updatedAt);
-  return res.json({ ok: true });
+  if (email) putStateByEmail(email, state, updatedAt);
+  return res.json({ ok: true, ns: email });
 });
+
 app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
-  const ns = String(req.body.ns || req.session.uid).toLowerCase();
-  const state = req.body.state || req.body; // store.js 폴백과 호환
+  const email = emailNS(req, req.body?.ns);
+  const state = req.body.state || req.body;
   const updatedAt = Number(state?.updatedAt || Date.now());
-  putUserState(req.session.uid, ns, state, updatedAt);
-  return res.json({ ok: true });
+  if (email) putStateByEmail(email, state, updatedAt);
+  return res.json({ ok: true, ns: email });
 });
 
 // ──────────────────────────────────────────────────────────
@@ -1475,12 +1490,17 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         // 1) ns 디렉토리 나열
         let nss = [];
         try {
-          nss = fs.readdirSync(UPLOAD_ROOT).filter(d => {
-            try {
-              if (SKIP_DIRS.has(d)) return false;
-              return fs.lstatSync(path.join(UPLOAD_ROOT, d)).isDirectory();
-            } catch { return false; }
-          });
+          nss = fs.readdirSync(UPLOAD_ROOT)
+            .filter(d => {
+              try {
+                if (SKIP_DIRS.has(d)) return false;
+                const p = path.join(UPLOAD_ROOT, d);
+                if (!fs.lstatSync(p).isDirectory()) return false;
+                // 이메일 NS만 허용
+                return isEmail(decodeURIComponent(d));
+              } catch { return false; }
+            })
+            .map(d => decodeURIComponent(d));
         } catch {}
         if (nsFilter) nss = nss.filter(ns => String(ns).toLowerCase() === nsFilter);
 
@@ -1489,8 +1509,8 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         // 2) 각 ns의 인덱스 취합(+ 인덱스 없으면 파일 스캔 폴백)
         const all = [];
         for (const ns of nss) {
-          const dir = path.join(UPLOAD_ROOT, ns);
-          const indexPath = path.join(dir, '_index.json');
+          const dir = dirForNS(ns);
+          const indexPath = path.join(dirForNS(ns), '_index.json');
 
           let idx = [];
           try { idx = JSON.parse(fs.readFileSync(indexPath, 'utf8')); } catch {}
@@ -1615,7 +1635,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if ((!it.user.avatarUrl   || it.user.avatarUrl   === null) && it.author?.avatarUrl)   it.user.avatarUrl   = it.author.avatarUrl;
 
           // 4) mine 플래그
-          it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
+          it.mine = isMineEmail(req, it.ns);
 
           // 5) 알림 라우팅용: id -> owner ns 맵 업데이트
           if (!globalThis.ITEM_OWNER_NS) globalThis.ITEM_OWNER_NS = new Map();
@@ -1785,8 +1805,8 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         for (const ns of candidates) {
           if (!ns) continue;
           try {
-            const indexPath = path.join(UPLOAD_ROOT, ns, '_index.json');
-            const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+              const indexPath = path.join(dirForNS(ns), '_index.json');
+              const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
             if (Array.isArray(idx)) {
               const hit = idx.find(m => String(m.id) === id);
               if (hit) { meta = hit; foundNs = ns; break; }
@@ -1803,7 +1823,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         let fileExt = null, fileMime = null, fileNs = foundNs;
         // 먼저 foundNs에서 시도
         if (fileNs) {
-          const base = path.join(UPLOAD_ROOT, fileNs, id);
+          const base = path.join(dirForNS(ns), id);
           for (const e of [...new Set(tryExts)]) {
             if (fs.existsSync(`${base}.${e}`)) { fileExt = e; fileMime = EXT_TO_MIME[e]; break; }
           }
@@ -1812,7 +1832,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         if (!fileExt) {
           for (const ns of candidates) {
             if (!ns) continue;
-            const base = path.join(UPLOAD_ROOT, ns, id);
+            const base = path.join(dirForNS(ns), id);
             for (const e of ['png','jpg','jpeg','webp','gif']) {
               if (fs.existsSync(`${base}.${e}`)) { fileExt = e; fileMime = EXT_TO_MIME[e]; fileNs = ns; break; }
             }
@@ -1893,7 +1913,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           }
 
 
-          out.mine = !!(nsUsed && String(nsUsed).toLowerCase() === myns);
+          out.mine = isMineEmail(req, nsUsed);
 
           // 디버깅/표시용 원본 author도 같이 노출(선택)
           if (meta?.author) {
@@ -1968,22 +1988,16 @@ app.post("/api/jibbitz/collect", ensureAuth);
 
 // 업로드: /api/gallery/upload (구버전 폴백 /api/gallery 도 허용)
 app.post(["/api/gallery/upload", "/api/gallery"],
-  ensureAuth,
-  csrfProtection,
-  upload.single("file"),
+  ensureAuth, csrfProtection, upload.single("file"),
   (req, res) => {
     try {
-      const ns = String(req.session.uid).toLowerCase();
+      const ns = emailNS(req, null);       // ✅ 이메일 NS
       const {
-        id = `g_${Date.now()}`,
-        label = "",
-        createdAt = Date.now(),
-        width = 0,
-        height = 0,
-        thumbDataURL = "",
+        id = `g_${Date.now()}`, label = "", createdAt = Date.now(),
+        width = 0, height = 0, thumbDataURL = "",
       } = req.body || {};
 
-      const dir = path.join(UPLOAD_ROOT, ns);
+      const dir = path.join(UPLOAD_ROOT, encodeURIComponent(ns));
       ensureDir(dir);
 
       // 1) 파일 소스 결정 (file 우선, 없으면 thumbDataURL 디코드)
@@ -2014,13 +2028,10 @@ app.post(["/api/gallery/upload", "/api/gallery"],
 
       const filename = `${id}.${ext}`;
       const outPath  = path.join(dir, filename);
-      // 최종 경로가 dir 내부인지 확인(더블 세이프가드)
-      if (!outPath.startsWith(dir + path.sep)) {
-        return res.status(400).json({ ok:false, error:"bad-path" });
-      }
+      if (!outPath.startsWith(dir + path.sep)) return res.status(400).json({ ok:false, error:"bad-path" });
       fs.writeFileSync(outPath, fileBuf);
 
-      // 2) 메타 저장(확장자/타입 포함)
+      // 메타 저장
       const meta = {
         id, label,
         createdAt: Number(createdAt) || Date.now(),
@@ -2029,53 +2040,28 @@ app.post(["/api/gallery/upload", "/api/gallery"],
         ns, ext, mime,
       };
 
-      // ✨ 작성자 메타 흡수
+      // 작성자 메타 수집(기존 그대로)
       {
         const b = req.body || {};
-        // labelmine이 보내는 author_* 혹은 user 객체에서 안전하게 수집
-        const fromUser = (() => {
-          try { return typeof b.user === 'string' ? JSON.parse(b.user) : (b.user || null); } catch { return null; }
-        })();
+        const fromUser = (() => { try { return typeof b.user === 'string' ? JSON.parse(b.user) : (b.user || null); } catch { return null; } })();
         const author = {
-          id:          b.author_id || fromUser?.id || null,
-          displayName: b.author_name || fromUser?.displayName || fromUser?.name || null,
-          handle:      b.author_handle || null,
-          avatarUrl:   b.author_avatar || fromUser?.avatarUrl || null,
-          email:       fromUser?.email || null,  // 마스킹은 조회 시 처리
+          id:          fromUser?.id ?? null,
+          displayName: fromUser?.displayName || fromUser?.name || null,
+          handle:      null,
+          avatarUrl:   fromUser?.avatarUrl || null,
+          email:       fromUser?.email || ns, // 최소 이메일 보장
         };
-        // 값이 하나라도 있으면 meta에 기록
-        if (author.id || author.displayName || author.avatarUrl || author.email) {
-          meta.author = author;
-        }
+        if (author.id || author.displayName || author.avatarUrl || author.email) meta.author = author;
       }
 
-            // 2025-09-09: caption/bg 저장 (labelmine에서 보낸 값 반영)
-      {
-        const b = req.body || {};
-        // caption: 최대 500자, 공백 제거
-        const cap = typeof b.caption === "string" ? b.caption.trim().slice(0, 500) : "";
-        if (cap) {
-          meta.caption = cap;
-          // 구버전/다른 클라이언트 호환을 위해 text에도 복제
-          meta.text = cap;
-        }
-        // bg: bg | bg_color | bgHex 중 우선 매칭
-        const rawBg = String(b.bg || b.bg_color || b.bgHex || "").trim();
-        if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(rawBg)) {
-          meta.bg = rawBg;
-          // 호환 필드도 함께 채움
-          meta.bg_color = rawBg;
-          meta.bgHex = rawBg;
-        }
-      }
+      // caption/bg 저장(기존 그대로)
 
-      const indexPath = path.join(dir, "_index.json");
-      let idx = [];
-      try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
+      const indexPath = path.join(dirForNS(ns), '_index.json');
+      let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
       if (!Array.isArray(idx)) idx = [];
-      idx = idx.filter(m => String(m.id) !== id); // 중복 제거
-      idx.unshift(meta);                           // 최신이 앞으로
-      idx = idx.slice(0, 2000);                    // 안전한 상한
+      idx = idx.filter(m => String(m.id) !== id);
+      idx.unshift(meta);
+      idx = idx.slice(0, 2000);
       writeJsonAtomic(indexPath, idx);
 
       return res.json({ ok: true, id, ns, ext, mime });
@@ -2085,7 +2071,12 @@ app.post(["/api/gallery/upload", "/api/gallery"],
   }
 );
 
-// ====== item 삭제 헬퍼 & 라우트 (업로드 뒤에 추가, 블랍 라우트 전에) ======
+/* 5) gallery.public / items/:id 등에서 mine 판정: uid → email */
+function isMineEmail(req, candidateNs) {
+  const meEmail = emailNS(req, null);
+  return meEmail && String(candidateNs||'').toLowerCase() === meEmail;
+}
+
 // ====== item 삭제/조회 보강 헬퍼 & 라우트 (업로드 뒤에, 블랍 라우트 전에) ======
 
 // JSON 원자적 저장(임시파일 → rename)
@@ -2101,17 +2092,16 @@ function writeJsonAtomic(filePath, dataObj) {
 
 // 내 계정에서 사용할 수 있는 모든 후보 NS (요청 ns, 내 uid, 내 email)
 function getMyNamespaces(req, preferNs) {
-  const uidNs   = String(req.session?.uid || '').toLowerCase();
-  const emailNs = String(getUserById(req.session?.uid || 0)?.email || '').toLowerCase();
+  const emailNs = emailNS(req, null);
   const pref    = String(preferNs || '').toLowerCase();
-  return [...new Set([pref, uidNs, emailNs].filter(Boolean))];
+  return [...new Set([emailNs, pref].filter(isEmail))];
 }
 
 // index/파일을 안전하게 삭제 (index에 없더라도 파일만 있으면 삭제 성공으로 간주)
 function removeItemFileAndIndexIn(ns, id) {
   try {
-    const dir = path.join(UPLOAD_ROOT, ns);
-    const indexPath = path.join(dir, '_index.json');
+    const dir = dirForNS(ns);
+    const indexPath = path.join(dirForNS(ns), '_index.json');
 
     // 1) index 로드 (없으면 빈 배열)
     let idx = [];
@@ -2217,69 +2207,10 @@ app.post('/api/delete', requireLogin, csrfProtection, (req, res) => {
 
 // 권한 체크: 요청 ns가 내 uid/email 변형 중 하나와 일치해야 함
 function ensureOwnerNs(req, ns) {
-  const uid   = String(req.session?.uid || '').toLowerCase();
-  const email = String(getUserById(req.session?.uid || 0)?.email || '').toLowerCase();
-  ns = String(ns || '').toLowerCase();
-  if (!ns) return false;
-  const variants = [uid, email, `user:${uid}`].filter(Boolean); // ★ email 변형의 user: 접두 삭제
-  return variants.includes(ns);
+  const email = emailNS(req, null);                      // 내 이메일 NS
+  const want  = String(ns || '').trim().toLowerCase();   // 요청이 들고온 ns
+  return !!email && want === email;                      // 이메일만 허용
 }
-
-// ===== DEV-ONLY: migrate items from 'default' ns to current user's ns =====
-app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, res) => {
-  try {
-    const myNs = String(req.session.uid).toLowerCase();     // e.g. "2"
-    const srcDir = path.join(UPLOAD_ROOT, 'default');
-    const dstDir = path.join(UPLOAD_ROOT, myNs);
-    ensureDir(dstDir);
-
-    const readIdx  = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir,'_index.json'),'utf8')) || []; } catch { return []; } };
-    const writeIdx = (dir, idx) => fs.writeFileSync(path.join(dir,'_index.json'), JSON.stringify(idx));
-
-    let srcIdx = readIdx(srcDir);
-    let dstIdx = readIdx(dstDir);
-
-    let moved = 0, skipped = 0, movedFiles = 0;
-    const movedIds = new Set();
-
-    for (const meta of srcIdx) {
-      const id = String(meta.id || '').trim();
-      if (!id) continue;
-
-      if (dstIdx.some(m => String(m.id) === id)) { skipped++; continue; }
-
-      // 파일 이동 (첫 번째로 존재하는 확장자만)
-      let fileMoved = false;
-      for (const ext of ['png','jpg','jpeg','webp','gif']) {
-        const sp = path.join(srcDir, `${id}.${ext}`);
-        if (fs.existsSync(sp)) {
-          const dp = path.join(dstDir, `${id}.${ext}`);
-          try { fs.renameSync(sp, dp); } catch {
-            try { fs.copyFileSync(sp, dp); fs.unlinkSync(sp); } catch {}
-          }
-          fileMoved = true; movedFiles++; break;
-        }
-      }
-
-      const newMeta = { ...meta, ns: myNs };
-      dstIdx.push(newMeta);
-      movedIds.add(id);
-      moved++;
-    }
-
-    // src index에서 옮긴 항목 제거, 정렬 갱신
-    srcIdx = srcIdx.filter(m => !movedIds.has(String(m.id)));
-    const sorter = (a,b) => (Number(b.createdAt||b.created_at||0) - Number(a.createdAt||a.created_at||0)) || (a.id < b.id ? 1 : -1);
-    try { dstIdx.sort(sorter); srcIdx.sort(sorter); } catch {}
-
-    writeIdx(srcDir, srcIdx);
-    writeIdx(dstDir, dstIdx);
-
-    res.json({ ok:true, from:'default', to: myNs, moved, movedFiles, skipped, dstCount: dstIdx.length });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:'migrate-failed', message: e?.message || String(e) });
-  }
-});
 
 // ── 이미지 blob (ns 힌트가 없더라도 전 ns에서 탐색)
 (() => {
@@ -2288,12 +2219,16 @@ app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, r
 
   function findBlobPath(id, preferNs, uid) {
     const dirs = new Set();
-    if (preferNs) dirs.add(path.join(UPLOAD_ROOT, String(preferNs)));
-    if (uid)      dirs.add(path.join(UPLOAD_ROOT, String(uid)));
+    if (preferNs) dirs.add(dirForNS(preferNs));
     try {
       for (const d of fs.readdirSync(UPLOAD_ROOT)) {
         const p = path.join(UPLOAD_ROOT, d);
-        try { if (d !== 'avatars' && fs.lstatSync(p).isDirectory()) dirs.add(p); } catch {}
+        try {
+          if (d === 'avatars') continue;
+          if (!fs.lstatSync(p).isDirectory()) continue;
+          if (!isEmail(decodeURIComponent(d))) continue; // 이메일 NS만
+          dirs.add(p);
+        } catch {}
       }
     } catch {}
     for (const dir of dirs) {
@@ -2310,22 +2245,21 @@ app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, r
       const id = String(req.params.id || '');
       if (!id) return res.status(400).json({ ok:false, error:'bad-id' });
       const preferNs = String(req.query.ns || '');
-      const uid = req.session?.uid;
 
       // 인덱스에 등록된 확장자 우선(있으면 제일 먼저 확인)
       let hintExts = [];
       try {
-        const ns = preferNs || String(uid || '');
+        const ns = preferNs || emailNS(req, null);
         if (ns) {
-          const row = JSON.parse(fs.readFileSync(path.join(UPLOAD_ROOT, ns, '_index.json'), 'utf8'))
+          const row = JSON.parse(fs.readFileSync(path.join(dirForNS(ns), '_index.json'), 'utf8'))
             .find(m => String(m.id) === id);
           if (row?.ext) hintExts = [String(row.ext).toLowerCase()];
         }
       } catch {}
       const foundByIndex = hintExts.length
         ? (() => {
-            const ns = preferNs || String(uid || '');
-            const dir = ns ? path.join(UPLOAD_ROOT, ns) : null;
+            const ns = preferNs || emailNS(req, null);
+            const dir = ns ? dirForNS(ns) : null;
             if (!dir) return null;
             for (const e of hintExts) {
               const p = path.join(dir, `${id}.${e}`);

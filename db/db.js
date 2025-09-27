@@ -311,6 +311,9 @@ module.exports = {
   listUserNamespaces,
   deleteUserState,
 
+  // ✅ email 전용 저장 헬퍼 export
+  putStateByEmail,
+
   // util
   withTransaction,
 };
