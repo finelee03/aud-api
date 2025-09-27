@@ -809,7 +809,11 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
     if (err) return res.status(500).json({ ok: false });
     req.session.uid = row.id;
     markNavigate(req);
-    return res.json({ ok: true, id: row.id });
+    // 👇 저장 보장 (스토어 쓰기 실패면 여기서 바로 잡힘)
+    req.session.save((saveErr) => {
+      if (saveErr) return res.status(500).json({ ok:false, error:"SESSION_SAVE_FAILED" });
+      return res.json({ ok: true, id: row.id });
+    });
   });
 });
 
@@ -2586,4 +2590,10 @@ server.listen(PORT, () => {
   } catch (e) {
     console.log("[ble] bridge failed to start:", e?.message || e);
   }
+
+
+app.get('/debug/session', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ sid: req.sessionID, uid: req.session?.uid ?? null, hasSession: !!req.session });
+});
 });
