@@ -991,6 +991,28 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
   }
 });
 
+// adminRouter 아래에 추가
+adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res) => {
+  try {
+    const ns = String(req.body?.ns || "").trim();
+    const id = String(req.body?.id || "").trim();
+    if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
+
+    const dir = path.join(AUDLAB_ROOT, nsSafe(ns));
+    const indexPath = path.join(dir, "_index.json");
+
+    let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
+    let hit = null;
+    idx = (Array.isArray(idx) ? idx : []).map(m => {
+      if (String(m.id) === id) { hit = m; return { ...m, accepted:true, updatedAt:Date.now() }; }
+      return m;
+    });
+    if (!hit) return res.status(404).json({ ok:false, error:"not_found" });
+
+    fs.writeFileSync(indexPath, JSON.stringify(idx));
+    return res.json({ ok:true });
+  } catch { return res.status(500).json({ ok:false }); }
+});
 
 app.use("/api", adminRouter);
 
