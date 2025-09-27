@@ -83,6 +83,10 @@ function migrateEmailNsOnBoot() {
   if (!want) return;
 
   try {
+    if (typeof migrateAllUserStatesToEmail !== "function") {
+      console.log("[MIGRATE] skip: migrateAllUserStatesToEmail not available");
+      return;
+    }
     console.log("[MIGRATE] consolidating user_states to email namespace...");
     const stats = migrateAllUserStatesToEmail();
     // 표 형태 요약
@@ -1058,7 +1062,7 @@ try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
 
-app.post("/admin/migrate/email-ns", requireAdmin, csrfProtection, (req, res) => {
+app.post("/api/admin/migrate/email-ns", requireAdmin, csrfProtection, (req, res) => {
   // why: 여러 FE/프록시에서 호출할 수 있게 JSON 결과 반환
   try {
     const stats = migrateAllUserStatesToEmail();
@@ -1388,44 +1392,6 @@ app.patch("/auth/me", requireLogin, csrfProtection, async (req, res) => {
     displayName,
   });
 });
-
-
-// me & ping
-function meHandler(req, res) {
-  sendNoStore(res);
-  const base = statusPayload(req);
-  if (!base.authenticated) return res.json(base);
-
-  const u = getUserById(req.session.uid);
-
-  // display_name 컬럼이 있어도/없어도 안전하게 읽기
-  let displayName = null;
-  try {
-    const cols = db.prepare("PRAGMA table_info(users)").all().map(r => String(r.name));
-    if (cols.includes("display_name")) {
-      const r = db.prepare("SELECT display_name FROM users WHERE id=?").get(req.session.uid);
-      displayName = r?.display_name || null;
-    }
-  } catch {}
-
-  const avatarUrl = latestAvatarUrl(req.session.uid);
-
-  // ★ user 안과 top-level 둘 다 넣어 FE 호환 보장
-  const payload = {
-    ...base,
-    user: u ? { id: u.id, email: u.email, displayName } : null,
-    ns: String(req.session.uid),
-  };
-  if (u) {
-    payload.email = u.email;        // legacy FE 호환
-    payload.displayName = displayName;
-    payload.name = displayName;     // name 키로만 읽는 클라 대비
-    payload.avatarUrl = avatarUrl;
-  }
-  return res.json(payload);
-}
-
-app.get(["/auth/me", "/api/auth/me"], meHandler);
 
 // 경량 헬스체크
 app.get("/api/healthz", (_req, res) => {
@@ -1783,7 +1749,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
           if ((!it.user.avatarUrl   || it.user.avatarUrl   === null) && it.author?.avatarUrl)   it.user.avatarUrl   = it.author.avatarUrl;
 
           // 4) mine 플래그
-          it.mine = String(it.ns).toLowerCase() === String(req.session?.uid || '').toLowerCase();
+          it.mine = String(it.ns || '').toLowerCase() === String(getNS(req) || '').toLowerCase();
 
           // 5) 알림 라우팅용: id -> owner ns 맵 업데이트
           ITEM_OWNER_NS.set(String(it.id), String(it.ns));
@@ -2016,7 +1982,7 @@ mountIfExists("./routes/likes.routes");     // PUT/DELETE /api/items/:id/like
         try {
           // nsUsed: 파일이 위치한 오너 네임스페이스
           const nsUsed   = out.ns || preferNs;
-          const myns     = String(req.session?.uid || '').toLowerCase();
+          const myns     = String(getNS(req) || '').toLowerCase();
           const ownerId  = Number(nsUsed);
           const ownerRow = Number.isFinite(ownerId) ? getUserById(ownerId) : null;
 
@@ -2390,7 +2356,7 @@ function ensureOwnerNs(req, ns) {
 // ===== DEV-ONLY: migrate items from 'default' ns to current user's ns =====
 app.post('/api/dev/migrate-default-to-me', requireLogin, csrfProtection, (req, res) => {
   try {
-    const myNs = String(req.session.uid).toLowerCase();     // e.g. "2"
+    const myns     = String(getNS(req) || '').toLowerCase();
     const srcDir = path.join(UPLOAD_ROOT, 'default');
     const dstDir = path.join(UPLOAD_ROOT, myNs);
     ensureDir(dstDir);
