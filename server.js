@@ -485,6 +485,16 @@ const SESSION_DB_PATH =
   process.env.SESSION_DB_PATH ||
   path.join(DATA_DIR, "sessions.sqlite");
 const sessionDB = new Sqlite(SESSION_DB_PATH);
+try {
+  // Render 영구디스크(NFS)에서 WAL은 충돌 빈도가 높음 → DELETE 모드 권장
+  sessionDB.pragma('journal_mode = DELETE');
+  // 잠금 경합시 5초 대기
+  sessionDB.pragma('busy_timeout = 5000');
+  // fsync 부담 낮추기(안정성/속도 균형)
+  sessionDB.pragma('synchronous = NORMAL');
+} catch (e) {
+  console.warn('[session.sqlite] pragma set failed:', e?.message || e);
+}
 const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;        // 7일(ms)
 const MAX_AGE_SEC = Math.floor(MAX_AGE_MS / 1000); // 7일(sec)
 
@@ -1434,6 +1444,36 @@ app.get("/api/healthz", (_req, res) => {
   res.set("Cache-Control", "no-store");
   res.json({ ok: true, bootId: BOOT_ID });
 });
+
+// 세션/쿠키 스냅샷
+app.get('/debug/session', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    sid: req.sessionID || null,
+    uid: req.session?.uid ?? null,
+    hasSession: !!req.session,
+    cookie: req.session?.cookie ?? null
+  });
+});
+
+// 세션 저장 강제 테스트(쓰기 성공/실패 바로 확인)
+app.post('/debug/session-store', async (req, res) => {
+  try {
+    if (!req.session) return res.status(500).json({ ok:false, note:'no session object' });
+    const t = Date.now();
+    req.session.__probe = t;
+    req.session.save((err) => {
+      if (err) {
+        console.error('[SESSION-PROBE] save failed:', err?.message || err);
+        return res.status(500).json({ ok:false, error:'SAVE_FAILED', message: err?.message || String(err) });
+      }
+      res.json({ ok:true, wrote: t });
+    });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:'EX', message: e?.message || String(e) });
+  }
+});
+
 
 // ──────────────────────────────────────────────────────────
 // 이메일 NS 강제 상태 API
@@ -2599,54 +2639,5 @@ server.listen(PORT, () => {
   } catch (e) {
     console.log("[ble] bridge failed to start:", e?.message || e);
   }
-
-
-// --- debug: fs paths & writability ---
-function isWritable(p) {
-  try {
-    // 디렉토리면 그 안에 임시파일로 테스트
-    const stat = fs.existsSync(p) ? fs.statSync(p) : null;
-    const dir = stat && stat.isDirectory() ? p : path.dirname(p);
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = path.join(dir, `.wtest-${Date.now()}`);
-    fs.writeFileSync(tmp, 'ok');
-    fs.unlinkSync(tmp);
-    return true;
-  } catch { return false; }
-}
-
-app.get('/debug/fs', (req, res) => {
-  const DATA_DIR =
-    process.env.DATA_DIR ||
-    process.env.RENDER_DISK_PATH ||
-    (fs.existsSync('/var/data') ? '/var/data' : '/tmp');
-
-  const SESSION_DB_PATH =
-    process.env.SESSION_DB_PATH ||
-    path.join(DATA_DIR, 'sessions.sqlite');
-
-  const UPLOAD_ROOT =
-    process.env.UPLOAD_ROOT ||
-    path.join(DATA_DIR, 'uploads');
-
-  const out = {
-    DATA_DIR,
-    SESSION_DB_PATH,
-    UPLOAD_ROOT,
-    exists: {
-      dataDir: fs.existsSync(DATA_DIR),
-      sessDir: fs.existsSync(path.dirname(SESSION_DB_PATH)),
-      upload : fs.existsSync(UPLOAD_ROOT),
-    },
-    writable: {
-      dataDir: isWritable(DATA_DIR),
-      sessDir: isWritable(path.dirname(SESSION_DB_PATH)),
-      upload : isWritable(UPLOAD_ROOT),
-    }
-  };
-  res.set('Cache-Control', 'no-store');
-  res.json(out);
-});
-
 
 });
