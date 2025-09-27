@@ -69,6 +69,49 @@ function findFirstExisting(dir, id, exts) {
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
 
+/** 재귀 디렉토리 제거(존재해도/없어도 안전) */
+function rmrfSafe(dir) {
+  try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+}
+
+/** 단일 유저의 모든 데이터 정리 (best-effort) */
+function purgeAllUserData(uid) {
+  if (!uid) return;
+  try {
+    // 1) 상태/소셜/좋아요 등 레코드 제거(테이블은 환경마다 다를 수 있으므로 try/catch 다중 시도)
+    try { db.prepare('DELETE FROM user_states WHERE user_id=?').run(uid); } catch {}
+    try { db.prepare('DELETE FROM item_likes  WHERE user_id=?').run(uid); } catch {}
+    try { db.prepare('DELETE FROM item_votes  WHERE user_id=?').run(uid); } catch {}
+    try { db.prepare('DELETE FROM items       WHERE user_id=?').run(uid); } catch {}
+    try { db.prepare('DELETE FROM avatars     WHERE user_id=?').run(uid); } catch {}
+    // 2) 업로드 디렉토리/아바타 파일(프로젝트 구조에 맞게 후보 경로 정리)
+    try { rmrfSafe(path.join(UPLOAD_ROOT, String(uid))); } catch {}
+    try { rmrfSafe(path.join(UPLOAD_ROOT, 'avatars', String(uid))); } catch {}
+    try { rmrfSafe(path.join(UPLOAD_ROOT, 'audlab',  String(uid))); } catch {}
+  } catch {}
+}
+
+/** 계정 삭제 공통 처리 */
+function deleteMyAccount(req, res) {
+  if (!req.session?.uid) return res.status(401).json({ ok:false });
+  const name = PROD ? "__Host-sid" : "sid";
+  const clearOpts = { path: "/", sameSite: CROSS_SITE ? "none" : "lax", secure: PROD || CROSS_SITE };
+
+  try { purgeAllUserData(req.session.uid); } catch {}
+
+  // 마지막으로 users 테이블에서 유저 삭제(존재 시)
+  try { db.prepare('DELETE FROM users WHERE id=?').run(req.session.uid); } catch {}
+
+  // 세션 파기 + 쿠키 제거
+  const done = () => {
+    try { res.clearCookie(name, clearOpts); } catch {}
+    try { res.clearCookie(CSRF_COOKIE_NAME, clearOpts); } catch {}
+    // 204: 본문 없음. FE는 200/204 모두 성공으로 처리함
+    return res.status(204).end();
+  };
+  return req.session ? req.session.destroy(done) : done();
+}
+
 const USER_AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
 try { fs.mkdirSync(USER_AUDLAB_ROOT, { recursive: true }); } catch {}
 
@@ -694,6 +737,24 @@ app.post("/auth/logout-beacon", (req, res) => {
     res.json({ ok: true });
   });
 });
+
+// 1) DELETE /auth/me  (정석)
+app.delete("/auth/me", requireLogin, csrfProtection, (req, res) => {
+  deleteMyAccount(req, res);
+});
+
+// 2) POST /auth/delete  (폴백; 일부 FE/프록시 환경 호환)
+app.post("/auth/delete", requireLogin, csrfProtection, (req, res) => {
+  deleteMyAccount(req, res);
+});
+
+// 3) POST /api/users/me  with {_method:"DELETE"} (추가 폴백)
+app.post("/api/users/me", requireLogin, csrfProtection, (req, res) => {
+  const m = String(req.body?._method || "").toUpperCase();
+  if (m === "DELETE") return deleteMyAccount(req, res);
+  return res.status(405).json({ ok:false, error:"method_not_allowed" });
+});
+
 app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
   try {
     const slot = ensureUserAudlabDir(req);
