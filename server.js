@@ -806,12 +806,21 @@ app.post("/auth/login", csrfProtection, async (req, res) => {
   if (!ok) return res.status(400).json({ ok: false, error: "BAD_CREDENTIALS" });
 
   req.session.regenerate((err) => {
-    if (err) return res.status(500).json({ ok: false });
+    if (err) {
+      console.error('[SESSION] regenerate failed:', err?.message || err);
+      return res.status(500).json({ ok:false, error:'SESSION_REGEN_FAILED' });
+    }
     req.session.uid = row.id;
     markNavigate(req);
     // 👇 저장 보장 (스토어 쓰기 실패면 여기서 바로 잡힘)
     req.session.save((saveErr) => {
-      if (saveErr) return res.status(500).json({ ok:false, error:"SESSION_SAVE_FAILED" });
+      if (saveErr) {
+        console.error('[SESSION] save failed:', saveErr?.message || saveErr);
+        if (saveErr && (saveErr.code || saveErr.errno)) {
+          console.error('[SESSION] code:', saveErr.code, 'errno:', saveErr.errno);
+        }
+        return res.status(500).json({ ok:false, error:"SESSION_SAVE_FAILED" });
+      }
       return res.json({ ok: true, id: row.id });
     });
   });
@@ -2592,29 +2601,52 @@ server.listen(PORT, () => {
   }
 
 
-app.get('/debug/session', (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  res.json({ sid: req.sessionID, uid: req.session?.uid ?? null, hasSession: !!req.session });
-});
+// --- debug: fs paths & writability ---
+function isWritable(p) {
+  try {
+    // 디렉토리면 그 안에 임시파일로 테스트
+    const stat = fs.existsSync(p) ? fs.statSync(p) : null;
+    const dir = stat && stat.isDirectory() ? p : path.dirname(p);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = path.join(dir, `.wtest-${Date.now()}`);
+    fs.writeFileSync(tmp, 'ok');
+    fs.unlinkSync(tmp);
+    return true;
+  } catch { return false; }
+}
 
 app.get('/debug/fs', (req, res) => {
-  const canW = (p) => { try { fs.accessSync(p, fs.constants.W_OK); return true; } catch { return false; } };
-  res.set('Cache-Control','no-store');
-  res.json({
-    DATA_DIR: EFFECTIVE_DATA_DIR,
+  const DATA_DIR =
+    process.env.DATA_DIR ||
+    process.env.RENDER_DISK_PATH ||
+    (fs.existsSync('/var/data') ? '/var/data' : '/tmp');
+
+  const SESSION_DB_PATH =
+    process.env.SESSION_DB_PATH ||
+    path.join(DATA_DIR, 'sessions.sqlite');
+
+  const UPLOAD_ROOT =
+    process.env.UPLOAD_ROOT ||
+    path.join(DATA_DIR, 'uploads');
+
+  const out = {
+    DATA_DIR,
     SESSION_DB_PATH,
     UPLOAD_ROOT,
     exists: {
-      dataDir: fs.existsSync(EFFECTIVE_DATA_DIR),
+      dataDir: fs.existsSync(DATA_DIR),
       sessDir: fs.existsSync(path.dirname(SESSION_DB_PATH)),
-      upload:  fs.existsSync(UPLOAD_ROOT),
+      upload : fs.existsSync(UPLOAD_ROOT),
     },
     writable: {
-      dataDir: canW(EFFECTIVE_DATA_DIR),
-      sessDir: canW(path.dirname(SESSION_DB_PATH)),
-      upload:  canW(UPLOAD_ROOT),
-    },
-  });
+      dataDir: isWritable(DATA_DIR),
+      sessDir: isWritable(path.dirname(SESSION_DB_PATH)),
+      upload : isWritable(UPLOAD_ROOT),
+    }
+  };
+  res.set('Cache-Control', 'no-store');
+  res.json(out);
 });
+
 
 });
