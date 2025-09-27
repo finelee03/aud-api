@@ -47,6 +47,7 @@ const {
   db, createUser, getUserByEmail, getUserById,
   getUserState, putUserState,
   getUserEmailById, getStateByEmail, putStateByEmail, deleteAllStatesForUser,
+  migrateAllUserStatesToEmail, // ★ 추가: 이메일 NS 마이그레이션
 } = require("./db");
 
   seedAdminUsers();
@@ -72,6 +73,29 @@ function findFirstExisting(dir, id, exts) {
 // ──────────────────────────────────────────────────────────
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
+
+// 2) 부팅 시 조건부 마이그레이션 훅 추가 (hardResetOnBoot 호출 부근에 배치)
+function migrateEmailNsOnBoot() {
+  // why: 운영에선 명시 opt-in, 개발에선 안전 기본 off
+  const want =
+    process.env.MIGRATE_EMAIL_NS_ON_BOOT === "1" ||
+    (process.env.NODE_ENV !== "production" && process.env.MIGRATE_EMAIL_NS_ON_BOOT === "dev");
+  if (!want) return;
+
+  try {
+    console.log("[MIGRATE] consolidating user_states to email namespace...");
+    const stats = migrateAllUserStatesToEmail();
+    // 표 형태 요약
+    try {
+      // console.table 이 없는 환경도 있으니 안전 호출
+      console.table?.(stats);
+    } catch {}
+    console.log("[MIGRATE] done:", stats);
+  } catch (e) {
+    console.error("[MIGRATE] failed:", e?.stack || e);
+  }
+}
+
 
 function hardResetOnBoot() {
   try {
@@ -1033,6 +1057,16 @@ const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
 try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
+
+app.post("/admin/migrate/email-ns", requireAdmin, csrfProtection, (req, res) => {
+  // why: 여러 FE/프록시에서 호출할 수 있게 JSON 결과 반환
+  try {
+    const stats = migrateAllUserStatesToEmail();
+    return res.json({ ok: true, stats });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:"migrate_failed", message: e?.message || String(e) });
+  }
+});
 
 // 업로드된 NS 리스트
 adminRouter.get("/admin/audlab/nses", requireAdmin, (req, res) => {
@@ -2554,6 +2588,7 @@ function printRoutesSafe() {
 
 // ──────────────────────────────────────────────────────────
 hardResetOnBoot();
+migrateEmailNsOnBoot();
 server.listen(PORT, () => {
   console.log(`listening: http://localhost:${PORT}`);
   if (!PROD) printRoutesSafe();
