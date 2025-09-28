@@ -60,9 +60,14 @@ const {
 
 const { startBleBridge } = require("./ble-bridge");
 
-const AVATAR_DIR = path.join(__dirname, "public", "uploads", "avatars");
-fs.mkdirSync(AVATAR_DIR, { recursive: true });
-const AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
+// --- Persistent data root ---
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, ".data"); // why: 배포시 볼륨 마운트 지점
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// 업로드(유저 파일)는 여전히 public/uploads 하위에 두되, 배포플랫폼에서 이 폴더도 볼륨으로 마운트 권장
+const AVATAR_DIR   = path.join(__dirname, "public", "uploads", "avatars");
+const AUDLAB_ROOT  = path.join(__dirname, "public", "uploads", "audlab");
+fs.mkdirSync(AVATAR_DIR,  { recursive: true });
 fs.mkdirSync(AUDLAB_ROOT, { recursive: true });
 
 function findFirstExisting(dir, id, exts) {
@@ -225,7 +230,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
 });
-const UPLOAD_ROOT = path.join(__dirname, "public", "uploads");
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "public", "uploads");
 process.env.UPLOAD_ROOT = process.env.UPLOAD_ROOT || UPLOAD_ROOT;
 process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
 process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
@@ -393,7 +398,7 @@ app.use(compression({
 
 // 세션
 const SqliteStore = SqliteStoreFactory(session);
-const sessionDB = new Sqlite(path.join(__dirname, "sessions.sqlite"));
+const sessionDB = new Sqlite(path.join(DATA_DIR, "sessions.sqlite"));
 const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
 const MAX_AGE_SEC = Math.floor(MAX_AGE_MS / 1000);
 

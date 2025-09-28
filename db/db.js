@@ -13,7 +13,9 @@ const Sqlite = require("better-sqlite3");
 // ─────────────────────────────────────────────────────────────
 // DB Open & Pragmas
 // ─────────────────────────────────────────────────────────────
-const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "app.db");
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), ".data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "app.db");
 const db = new Sqlite(DB_PATH);
 
 db.pragma("journal_mode = WAL");
