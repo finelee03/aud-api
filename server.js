@@ -959,9 +959,7 @@ const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
 
 // [NEW] 관리자 리더보드 (Top10): 포스팅 수 / 받은 투표 수 / 투표 일치율
 // server.js — fix admin leaderboards typos
-// (이 블록만 기존 adminRouter.get("/admin/leaderboards", ...) 본문과 교체)
-
-// REPLACE: adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => { ... })
+// REPLACE THIS WHOLE BLOCK
 adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
   try {
     const EMAIL_RX = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
@@ -975,63 +973,40 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
       return entries.filter(([,n]) => Number(n||0) === max).map(([k]) => k);
     };
 
-    const nsDirs = new Set();
-
-    // 1) AUDLAB_ROOT (lab 제출물)
-    if (fs.existsSync(AUDLAB_ROOT)) {
-      for (const d of fs.readdirSync(AUDLAB_ROOT, { withFileTypes:true })) {
-        if (d.isDirectory()) nsDirs.add(decodeURIComponent(d.name));
-      }
-    }
-
-    // 2) UPLOAD_ROOT (갤러리 업로드) — avatars 폴더 제외, 이메일형 디렉토리만
+    // ── 1) 갤러리(NS 디렉토리)만 스캔
+    const nsDirs = [];
     if (fs.existsSync(UPLOAD_ROOT)) {
       for (const d of fs.readdirSync(UPLOAD_ROOT, { withFileTypes:true })) {
         if (!d.isDirectory()) continue;
-        if (d.name === "avatars") continue;
+        if (d.name === "avatars") continue;               // 아바타 제외
         const ns = decodeURIComponent(d.name);
-        if (isEmail(ns)) nsDirs.add(ns.toLowerCase());
+        if (isEmail(ns)) nsDirs.push(ns.toLowerCase());   // 이메일 형태만
       }
     }
 
-    // ns별 아이템 목록(라벨 포함)을 읽는 헬퍼들
-    const readLabItems = (ns) => {
-      const dir = path.join(AUDLAB_ROOT, encodeURIComponent(ns));
-      if (!fs.existsSync(dir)) return [];
-      return fs.readdirSync(dir)
-        .filter(f => f.endsWith(".json") && f !== "_index.json")
-        .map(f => {
-          const id = f.replace(/\.json$/i, "");
-          let label = "";
-          try { label = String(JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))?.label || "").trim(); } catch {}
-          return { id, label };
-        });
-    };
+    // ── 2) 갤러리 인덱스에서 아이템(id/label) 읽기
     const readGalleryItems = (ns) => {
-      const dir = path.join(UPLOAD_ROOT, encodeURIComponent(ns));
-      const indexPath = path.join(dir, "_index.json");
+      const indexPath = path.join(dirForNS(ns), "_index.json");
       let idx = [];
       try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
       if (!Array.isArray(idx)) return [];
-      return idx.map(m => ({ id:String(m.id||""), label:String(m.label||"") })).filter(x => x.id);
+      return idx
+        .map(m => ({ id:String(m?.id||""), label:String(m?.label||"") }))
+        .filter(x => x.id);
     };
 
-    // 투표 카운트 쿼리
+    // ── 3) 투표 집계 (DB: item_votes)
     const stmtCounts = db.prepare(
       "SELECT label, COUNT(*) n FROM item_votes WHERE item_id=? GROUP BY label"
     );
 
     const perNS = [];
     for (const ns of nsDirs) {
-      const items = [
-        ...readLabItems(ns),
-        ...readGalleryItems(ns),
-      ];
-      if (!items.length) { perNS.push({ ns, posts:0, votes:0, participated:0, matched:0 }); continue; }
-
+      const items = readGalleryItems(ns);
       let posts = items.length, votes = 0, participated = 0, matched = 0;
+
       for (const it of items) {
-        let counts = {};
+        const counts = {};
         try {
           for (const r of stmtCounts.all(it.id)) {
             if (VOTE_LABELS.has(r.label)) counts[r.label] = (counts[r.label] || 0) + Number(r.n || 0);
@@ -1045,6 +1020,7 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
         }
         votes += total;
       }
+
       perNS.push({ ns, posts, votes, participated, matched });
     }
 
@@ -1078,9 +1054,9 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
       };
     };
 
-    const postsTop10 = pickTop(withRate, "posts", ["votes","participated"]);
-    const votesTop10 = pickTop(withRate, "votes", ["posts","participated"]);
-    const rateTop10  = pickTop(withRate, "rate",  ["participated","votes"]);
+    const postsTop10 = pickTop(withRate, "posts", ["votes", "participated"]);
+    const votesTop10 = pickTop(withRate, "votes", ["posts", "participated"]);
+    const rateTop10  = pickTop(withRate, "rate",  ["participated", "votes"]);
 
     res.json({
       ok: true,
@@ -1094,6 +1070,7 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
     res.status(500).json({ ok:false });
   }
 });
+
 
 // 업로드된 NS 리스트
 adminRouter.get("/admin/audlab/nses", requireAdmin, (req, res) => {
