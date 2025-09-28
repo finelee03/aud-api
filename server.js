@@ -2003,79 +2003,117 @@ app.post("/api/label/heart", ensureAuth);
 app.post("/api/jibbitz/collect", ensureAuth);
 
 // 업로드: /api/gallery/upload (구버전 폴백 /api/gallery 도 허용)
-app.post(["/api/gallery/upload", "/api/gallery"],
-  ensureAuth, csrfProtection, upload.single("file"),
-  (req, res) => {
+// server.js  — REPLACE this whole route handler
+
+app.post(
+  ["/api/gallery/upload", "/api/gallery"],
+  ensureAuth,
+  csrfProtection,
+  upload.single("file"),
+  async (req, res) => {
     try {
       const ns = emailNS(req, null);
-      const {
-        id = `g_${Date.now()}`, label = "", createdAt = Date.now(),
-        width = 0, height = 0, thumbDataURL = "",
-      } = req.body || {};
+      if (!ns) return res.status(400).json({ ok:false, error:"ns_unavailable" });
 
+      // 0) 입력 파라미터
+      const id        = String(req.body?.id || `g_${Date.now()}`);
+      const label     = String(req.body?.label || "");
+      const createdAt = Number(req.body?.createdAt || Date.now());
+
+      // 1) 이미지 소스 결정 (multipart 우선, 없으면 dataURL)
+      const EXT_MIME = { png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", webp:"image/webp", gif:"image/gif" };
+      let buf = null, ext = "png", mime = "image/png";
+
+      if (req.file) {
+        if (!isAllowedImageMime(req.file.mimetype)) {
+          return res.status(400).json({ ok:false, error:"bad_image_mime" });
+        }
+        buf  = req.file.buffer;
+        mime = (req.file.mimetype || "").toLowerCase();
+        ext  = (mime.split("/")[1] || "png").replace("jpeg","jpg");
+      } else if (req.body?.thumbDataURL) {
+        const decoded = decodeDataURL(req.body.thumbDataURL);
+        if (!decoded || !/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime)) {
+          return res.status(400).json({ ok:false, error:"bad_image_mime" });
+        }
+        if (decoded.buf.length > 8 * 1024 * 1024) {
+          return res.status(413).json({ ok:false, error:"image_too_large" });
+        }
+        buf = decoded.buf; ext = decoded.ext || "png"; mime = decoded.mime || EXT_MIME[ext] || "image/png";
+      }
+
+      if (!buf) return res.status(400).json({ ok:false, error:"no-image" });
+
+      // 2) 디렉토리/파일 저장
       const dir = path.join(UPLOAD_ROOT, encodeURIComponent(ns));
       ensureDir(dir);
-
-      let fileBuf = req.file?.buffer || null;
-      let ext = "png";
-      let mime = "image/png";
-
-      if (req.file && !isAllowedImageMime(req.file.mimetype)) {
-        return res.status(400).json({ ok:false, error:"bad_image_mime" });
-      }
-
-      if (!fileBuf && thumbDataURL) {
-        const decoded = decodeDataURL(thumbDataURL);
-        if (decoded) {
-          if (!/^image\//.test(decoded.mime) || !isAllowedImageMime(decoded.mime)) {
-            return res.status(400).json({ ok:false, error:"bad_image_mime" });
-         }
-          if (decoded.buf.length > 8 * 1024 * 1024) {
-            return res.status(413).json({ ok:false, error:"image_too_large" });
-          }
-          fileBuf = decoded.buf; ext = decoded.ext; mime = decoded.mime;
-        }
-      }
-
-      if (!fileBuf) return res.status(400).json({ ok: false, error: "no-image" });
-
       const filename = `${id}.${ext}`;
       const outPath  = path.join(dir, filename);
-      if (!outPath.startsWith(dir + path.sep)) return res.status(400).json({ ok:false, error:"bad-path" });
-      fs.writeFileSync(outPath, fileBuf);
+      if (!outPath.startsWith(dir + path.sep)) {
+        return res.status(400).json({ ok:false, error:"bad-path" });
+      }
+      fs.writeFileSync(outPath, buf);
 
+      // 3) caption/bg 정규화
+      const pickCaption = () => {
+        const s = String(req.body?.caption ?? req.body?.text ?? "").trim();
+        return s.length ? s : "";
+      };
+      const normHex = (v) => {
+        let s = String(v ?? "").trim();
+        if (/^#([0-9a-f]{3})$/i.test(s)) {
+          s = s.replace(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/i, (_,a,b,c)=>`#${a}${a}${b}${b}${c}${c}`);
+        }
+        return /^#([0-9a-f]{6})$/i.test(s) ? s.toLowerCase() : null;
+      };
+      const pickBg = () => normHex(req.body?.bg ?? req.body?.bg_color ?? req.body?.bgHex);
+
+      // 4) author(선택)
+      const fromUser = (() => {
+        try {
+          const b = req.body || {};
+          return typeof b.user === "string" ? JSON.parse(b.user) : (b.user || null);
+        } catch { return null; }
+      })();
+      const author = fromUser ? {
+        id:          fromUser.id ?? null,
+        displayName: fromUser.displayName || fromUser.name || null,
+        avatarUrl:   fromUser.avatarUrl || null,
+        email:       fromUser.email || ns,
+      } : { email: ns };
+
+      // 5) 메타 구축 (info 사용 안 함: 미정의였음)
       const meta = {
-        id, label,
-        createdAt: Number(createdAt) || Date.now(),
-        width: Number(width) || 0,
-        height: Number(height) || 0,
-        ns, ext, mime,
+        id,
+        ns,
+        label,
+        createdAt,
+        width:  Number(req.body?.width  || 0),
+        height: Number(req.body?.height || 0),
+        ext,
+        mime: mime || EXT_MIME[ext] || "image/png",
+        caption: pickCaption(),
+        bg:      pickBg(),
+        author
       };
 
-      {
-        const b = req.body || {};
-        const fromUser = (() => { try { return typeof b.user === 'string' ? JSON.parse(b.user) : (b.user || null); } catch { return null; } })();
-        const author = {
-          id:          fromUser?.id ?? null,
-          displayName: fromUser?.displayName || fromUser?.name || null,
-          handle:      null,
-          avatarUrl:   fromUser?.avatarUrl || null,
-          email:       fromUser?.email || ns,
-        };
-        if (author.id || author.displayName || author.avatarUrl || author.email) meta.author = author;
-      }
-
-      const indexPath = path.join(dirForNS(ns), '_index.json');
-      let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
+      // 6) _index.json 갱신 (선두 삽입, 최대 2000)
+      const indexPath = path.join(dirForNS(ns), "_index.json");
+      let idx = [];
+      try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
       if (!Array.isArray(idx)) idx = [];
-      idx = idx.filter(m => String(m.id) !== id);
+
+      idx = idx.filter(m => String(m?.id) !== id);
       idx.unshift(meta);
-      idx = idx.slice(0, 2000);
+      if (idx.length > 2000) idx.length = 2000;
+
       writeJsonAtomic(indexPath, idx);
 
-      return res.json({ ok: true, id, ns, ext, mime });
+      // 7) 응답
+      return res.json({ ok:true, id, ns, ext, mime: meta.mime });
     } catch (e) {
-      return res.status(500).json({ ok: false, error: "upload-failed" });
+      console.log("[/api/gallery/upload] fatal:", e?.stack || e);
+      return res.status(500).json({ ok:false, error:"upload-failed" });
     }
   }
 );
