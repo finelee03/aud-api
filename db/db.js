@@ -8,13 +8,14 @@
 // ─────────────────────────────────────────────────────────────
 
 const path = require("path");
+const fs = require("fs");
 const Sqlite = require("better-sqlite3");
 
 // ─────────────────────────────────────────────────────────────
 // DB Open & Pragmas
 // ─────────────────────────────────────────────────────────────
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), ".data");
-fs.mkdirSync(DATA_DIR, { recursive: true });
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "app.db");
 const db = new Sqlite(DB_PATH);
 
