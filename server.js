@@ -563,11 +563,11 @@ function publicUserShape(viewerUid, userRow) {
 function authorProfileShape(userRow) {
   if (!userRow) return null;
   const email = String(userRow.email || "");
-  const displayName = userRow.displayName || (email ? email.split("@")[0] : null);
+  const dn = getDisplayNameById(userRow.id) || (email ? email.split("@")[0] : null);
   return {
     id: userRow.id,
     email,
-    displayName,
+    displayName: dn,
     avatarUrl: latestAvatarUrl(userRow.id)
   };
 }
@@ -1027,17 +1027,21 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
     const rateTop10  = pickTop(withRate, "rate",  ["participated", "votes"]);
 
     const isEmail = s => /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(s || "").trim());
-    const decorate = (row) => ({
-      ns: row.ns,
-      displayName: isEmail(row.ns) ? row.ns.split("@")[0] : row.ns,
-      email: isEmail(row.ns) ? row.ns : null,
-      avatarUrl: null,
-      posts: row.posts,
-      votes: row.votes,
-      participated: row.participated,
-      matched: row.matched,
-      rate: row.rate
-    });
+    const decorate = (row) => {
+      const email = isEmail(row.ns) ? row.ns : null;
+      return {
+        ns: row.ns,
+        displayName: email ? row.ns.split("@")[0] : row.ns,
+        email,
+        avatarUrl: null,
+        posts: row.posts,
+        votes: row.votes,
+        participated: row.participated,
+        matched: row.matched,
+        rate: row.rate,
+        author: email ? { email, displayName: email.split("@")[0], avatarUrl: null, id: null } : null
+      };
+    };
 
     res.json({
       ok: true,
@@ -1291,7 +1295,7 @@ adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res
 
 app.use("/api", adminRouter);
 
-app.get("/api/audlab/admin/bootstrap", requireLogin, (req, res) => {
+function adminBootstrapHandler(req, res) {
   try {
     const row = getUserById(req.session.uid);
     const admin = !!(row && isAdminEmail(row.email));
@@ -1299,7 +1303,12 @@ app.get("/api/audlab/admin/bootstrap", requireLogin, (req, res) => {
   } catch {
     res.status(500).json({ ok:false });
   }
-});
+}
+
+// 두 경로 모두 허용 (프런트/구버전 호환)
+app.get("/api/audlab/admin/bootstrap", requireLogin, adminBootstrapHandler);
+app.get("/api/admin/audlab/bootstrap", requireLogin, adminBootstrapHandler);
+
 
 // 비밀번호 변경
 app.post("/auth/password",        requireLogin, csrfProtection, applyPasswordChange);
