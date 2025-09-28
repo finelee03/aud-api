@@ -288,6 +288,8 @@ async function handleAccountDelete(req, res) {
     db.prepare('DELETE FROM item_votes WHERE user_id=?').run(uid);
   } catch {}
 
+  try { deleteAllStatesForEmail(email); } catch {}
+
   // 유저 삭제 (user_states 는 FK CASCADE)
   deleteUser(uid);
 

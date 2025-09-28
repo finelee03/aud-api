@@ -1,8 +1,9 @@
-// db.js
+// file: db.js
 // ─────────────────────────────────────────────────────────────
 // Single source of truth for SQLite access & app data models.
 // - Users table: id / email / pw_hash / display_name / avatar_url
 // - User states: (user_id, ns) → JSON state with updated_at
+// - Push: push_subscriptions(ns, endpoint) / push_events(ev_key)
 // - Ready for express-session store sharing (same DB file OK)
 // ─────────────────────────────────────────────────────────────
 
@@ -15,14 +16,13 @@ const Sqlite = require("better-sqlite3");
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "app.db");
 const db = new Sqlite(DB_PATH);
 
-// 성능/안정성 권장 설정
-db.pragma("journal_mode = WAL");    // 동시성 향상
-db.pragma("foreign_keys = ON");     // FK 무결성
-db.pragma("synchronous = NORMAL");  // WAL과 궁합
-db.pragma("busy_timeout = 5000");   // 경합 시 5초 대기
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+db.pragma("synchronous = NORMAL");
+db.pragma("busy_timeout = 5000");
 
 // ─────────────────────────────────────────────────────────────
-// Schema (최신 스키마 기준으로 CREATE)
+/** Schema (최신 스키마 기준으로 CREATE) */
 // ─────────────────────────────────────────────────────────────
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -49,7 +49,6 @@ ON user_states (updated_at DESC);
 
 // ─────────────────────────────────────────────────────────────
 // One-time migrations (구버전 DB 대응)
-//  - 구 DB에 display_name, avatar_url 컬럼이 없을 수 있으니 보강
 // ─────────────────────────────────────────────────────────────
 function columnExists(table, col) {
   try {
@@ -59,7 +58,6 @@ function columnExists(table, col) {
     return false;
   }
 }
-
 if (!columnExists("users", "display_name")) {
   db.exec(`ALTER TABLE users ADD COLUMN display_name TEXT`);
 }
@@ -73,26 +71,9 @@ if (!columnExists("users", "avatar_url")) {
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
-
 function normalizeNS(ns) {
   return String(ns || "").trim().toLowerCase();
 }
-
- // ====== [ADD] Hard delete user (with cascade) ======
- function deleteUser(userId) {
-   userId = Number(userId);
-   if (!Number.isFinite(userId)) return false;
-   return withTransaction(() => {
-     try {
-       // 보강: 상태 테이블 선정리(구버전/임시 데이터 대비)
-       try { deleteAllStatesForUser(userId); } catch {}
-       const info = db.prepare(`DELETE FROM users WHERE id=?`).run(userId);
-       return info.changes > 0;
-     } catch {
-       return false;
-     }
-   });
- }
 
 // ─────────────────────────────────────────────────────────────
 // Prepared Statements
@@ -101,32 +82,27 @@ const stmtInsertUser = db.prepare(`
   INSERT INTO users (email, pw_hash, created_at, display_name, avatar_url)
   VALUES (LOWER(?), ?, ?, NULL, NULL)
 `);
-
 const stmtGetUserByEmail = db.prepare(`
   SELECT id, email, pw_hash, created_at, display_name, avatar_url
   FROM users
   WHERE email = LOWER(?)
 `);
-
 const stmtGetUserById = db.prepare(`
   SELECT id, email, pw_hash, created_at, display_name, avatar_url
   FROM users
   WHERE id = ?
 `);
-
 const stmtUpdateProfile = db.prepare(`
   UPDATE users
   SET display_name = COALESCE(?, display_name),
       avatar_url   = COALESCE(?, avatar_url)
   WHERE id = ?
 `);
-
 const stmtGetState = db.prepare(`
   SELECT state_json, updated_at
   FROM user_states
   WHERE user_id = ? AND ns = ?
 `);
-
 const stmtPutState = db.prepare(`
   INSERT INTO user_states (user_id, ns, state_json, updated_at)
   VALUES (?, ?, ?, ?)
@@ -134,24 +110,19 @@ const stmtPutState = db.prepare(`
     state_json = excluded.state_json,
     updated_at = excluded.updated_at
 `);
-
 const stmtListNamespaces = db.prepare(`
   SELECT ns, updated_at
   FROM user_states
   WHERE user_id = ?
   ORDER BY updated_at DESC
 `);
-
 const stmtDeleteState = db.prepare(`
   DELETE FROM user_states
   WHERE user_id = ? AND ns = ?
 `);
-
 const stmtGetUserIdByEmail = db.prepare(`
   SELECT id FROM users WHERE email = LOWER(?) LIMIT 1
 `);
-
-// email-first helpers
 const stmtDeleteAllStatesForUser = db.prepare(`
   DELETE FROM user_states WHERE user_id = ?
 `);
@@ -162,18 +133,28 @@ const stmtDeleteAllStatesForUser = db.prepare(`
 
 /**
  * Create user (email must be unique & already validated).
- * @param {string} email - user email (will be lowercased)
- * @param {string} pwHash - password hash (e.g., argon2)
- * @returns {number} user id (lastInsertRowid)
+ * Sets display_name default to email local-part to avoid "member".
  */
 function createUser(email, pwHash) {
   const createdAt = Date.now();
   const normEmail = normalizeEmail(email);
   const info = stmtInsertUser.run(normEmail, pwHash, createdAt);
-  return Number(info.lastInsertRowid);
+  const userId = Number(info.lastInsertRowid);
+
+  // 기본 display_name = 이메일 로컬파트
+  try {
+    const local = String(normEmail).split("@")[0] || "user";
+    db.prepare(
+      `UPDATE users
+         SET display_name = COALESCE(display_name, ?)
+       WHERE id = ?
+         AND (display_name IS NULL OR TRIM(display_name) = '')`
+    ).run(local, userId);
+  } catch {}
+
+  return userId;
 }
 
-/** @param {string} email */
 function getUserByEmail(email) {
   const row = stmtGetUserByEmail.get(normalizeEmail(email));
   if (!row) return null;
@@ -186,8 +167,6 @@ function getUserByEmail(email) {
     avatarUrl: row.avatar_url || null,
   };
 }
-
-/** @param {number} id */
 function getUserById(id) {
   const row = stmtGetUserById.get(id);
   if (!row) return null;
@@ -203,10 +182,7 @@ function getUserById(id) {
 
 /**
  * Update profile fields (partial update).
- * - null/undefined는 기존 값 유지(COALESCE)
- * @param {number} userId
- * @param {{displayName?: string|null, avatarUrl?: string|null}} patch
- * @returns {true}
+ * null/undefined는 기존 값 유지(COALESCE)
  */
 function updateUserProfile(userId, { displayName = null, avatarUrl = null } = {}) {
   stmtUpdateProfile.run(displayName ?? null, avatarUrl ?? null, userId);
@@ -216,13 +192,6 @@ function updateUserProfile(userId, { displayName = null, avatarUrl = null } = {}
 // ─────────────────────────────────────────────────────────────
 // User State APIs (namespace-based persistent snapshots)
 // ─────────────────────────────────────────────────────────────
-
-/**
- * Get a user's namespaced state.
- * @param {number} userId
- * @param {string} ns
- * @returns {{state: any, updatedAt: number} | null}
- */
 function getUserState(userId, ns) {
   const key = normalizeNS(ns);
   const row = stmtGetState.get(userId, key);
@@ -231,39 +200,15 @@ function getUserState(userId, ns) {
   try { state = JSON.parse(row.state_json); } catch {}
   return { state, updatedAt: row.updated_at };
 }
-
-/**
- * Upsert a user's namespaced state.
- * @param {number} userId
- * @param {string} ns
- * @param {any} state - serializable object
- * @param {number} [updatedAt=Date.now()]
- * @returns {true}
- */
 function putUserState(userId, ns, state, updatedAt = Date.now()) {
   const key = normalizeNS(ns);
   const json = JSON.stringify(state ?? {});
   stmtPutState.run(userId, key, json, Number(updatedAt) || Date.now());
   return true;
 }
-
-/**
- * List namespaces for a user (most-recent first).
- * @param {number} userId
- * @returns {Array<{ns:string, updatedAt:number}>}
- */
 function listUserNamespaces(userId) {
-  return stmtListNamespaces
-    .all(userId)
-    .map(r => ({ ns: r.ns, updatedAt: r.updated_at }));
+  return stmtListNamespaces.all(userId).map(r => ({ ns: r.ns, updatedAt: r.updated_at }));
 }
-
-/**
- * Delete a single namespaced state.
- * @param {number} userId
- * @param {string} ns
- * @returns {boolean} deleted
- */
 function deleteUserState(userId, ns) {
   const key = normalizeNS(ns);
   const info = stmtDeleteState.run(userId, key);
@@ -271,13 +216,12 @@ function deleteUserState(userId, ns) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Email-first State APIs (always use email as single namespace)
+// Email-first State APIs
 // ─────────────────────────────────────────────────────────────
 function getUserEmailById(id) {
   const row = stmtGetUserById.get(Number(id));
   return row ? normalizeEmail(row.email) : null;
 }
-
 function getStateByEmail(email) {
   const user = stmtGetUserByEmail.get(normalizeEmail(email));
   if (!user) return null;
@@ -287,7 +231,6 @@ function getStateByEmail(email) {
   try { state = JSON.parse(row.state_json); } catch {}
   return { state, updatedAt: row.updated_at };
 }
-
 function putStateByEmail(email, state, updatedAt = Date.now()) {
   const user = stmtGetUserByEmail.get(normalizeEmail(email));
   if (!user) return false;
@@ -295,18 +238,14 @@ function putStateByEmail(email, state, updatedAt = Date.now()) {
   stmtPutState.run(user.id, normalizeEmail(email), json, Number(updatedAt) || Date.now());
   return true;
 }
-
 function deleteAllStatesForUser(userId) {
   stmtDeleteAllStatesForUser.run(Number(userId));
   return true;
 }
 
-
 // ─────────────────────────────────────────────────────────────
 // Utility
 // ─────────────────────────────────────────────────────────────
-
-/** Run a function in a transaction. fn can return a value. */
 function withTransaction(fn) {
   const tx = db.transaction(fn);
   return tx();
@@ -326,46 +265,34 @@ function deleteAllStatesForEmail(email) {
   }
 }
 
-// 기존 deleteUser에서 쓰던 내부 헬퍼 노출이 필요하면 다음도 유지
-function deleteAllStatesForUser(userId) {
-  try {
-    stmtDeleteAllStatesForUser.run(Number(userId));
-    return true;
-  } catch {
-    return false;
-  }
+// ─────────────────────────────────────────────────────────────
+// Hard delete user (with cascade) + push cleanup
+// ─────────────────────────────────────────────────────────────
+function deleteUser(userId) {
+  userId = Number(userId);
+  if (!Number.isFinite(userId)) return false;
+
+  return withTransaction(() => {
+    try {
+      // 이메일 확보(why: ns 기반 리소스 정리)
+      const urow = stmtGetUserById.get(userId);
+      const email = urow ? normalizeEmail(urow.email) : "";
+
+      // 상태/구독 선정리(멱등)
+      try { deleteAllStatesForUser(userId); } catch {}
+      try { if (email) deletePushSubscriptionsByNS(email); } catch {}
+
+      const info = db.prepare(`DELETE FROM users WHERE id=?`).run(userId);
+      return info.changes > 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
-// Exports
-// ────ㅁ─────────────────────────────────────────────────────────
-module.exports = {
-  // raw handle (e.g., for session store)
-  db,
-
-  // users
-  createUser,
-  getUserByEmail,
-  getUserById,
-  updateUserProfile,
-  deleteUser,                 // [ADD]
-  deleteAllStatesForEmail,
-  deleteAllStatesForUser,    // [ADD] ensure exported
-
-  // states
-  getUserState,
-  putUserState,
-  listUserNamespaces,
-  deleteUserState,
-
-  // ✅ email 전용 저장 헬퍼 export
-  putStateByEmail,
-
-  // util
-  withTransaction,
-};
-
-// [ADD] Web Push storage
+// Push storage
+// ─────────────────────────────────────────────────────────────
 db.exec(`
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   ns          TEXT    NOT NULL,
@@ -379,30 +306,69 @@ CREATE TABLE IF NOT EXISTS push_events (
 );
 `);
 
-function addPushSubscription(ns, sub){
-  const row = db.prepare(`INSERT INTO push_subscriptions (ns, endpoint, json, created_at)
-                          VALUES (LOWER(?), ?, ?, ?) 
-                          ON CONFLICT(endpoint) DO UPDATE SET json=excluded.json, created_at=excluded.created_at`)
-                .run(String(ns||'').toLowerCase(), sub.endpoint, JSON.stringify(sub), Date.now());
+function addPushSubscription(ns, sub) {
+  db.prepare(`
+    INSERT INTO push_subscriptions (ns, endpoint, json, created_at)
+    VALUES (LOWER(?), ?, ?, ?)
+    ON CONFLICT(endpoint) DO UPDATE SET
+      json = excluded.json,
+      created_at = excluded.created_at
+  `).run(String(ns||'').toLowerCase(), sub.endpoint, JSON.stringify(sub), Date.now());
   return true;
 }
-function removePushSubscription(endpoint){
+function removePushSubscription(endpoint) {
   db.prepare(`DELETE FROM push_subscriptions WHERE endpoint=?`).run(endpoint);
   return true;
 }
-function listPushSubscriptions(ns){
-  return db.prepare(`SELECT endpoint, json FROM push_subscriptions WHERE ns=LOWER(?)`).all(String(ns||'').toLowerCase());
+function listPushSubscriptions(ns) {
+  return db.prepare(`SELECT endpoint, json FROM push_subscriptions WHERE ns=LOWER(?)`)
+           .all(String(ns||'').toLowerCase());
 }
-function seenPushEvent(evKey, ttlMs=1000*60*60*24){
+function seenPushEvent(evKey, ttlMs = 1000*60*60*24) {
   const now = Date.now();
   const row = db.prepare(`SELECT ts FROM push_events WHERE ev_key=?`).get(evKey);
-  if (row && (now - Number(row.ts||0) < ttlMs)) return true;
-  db.prepare(`INSERT INTO push_events (ev_key, ts) VALUES (?, ?)
-              ON CONFLICT(ev_key) DO UPDATE SET ts=excluded.ts`).run(evKey, now);
+  if (row && (now - Number(row.ts || 0) < ttlMs)) return true;
+  db.prepare(`
+    INSERT INTO push_events (ev_key, ts) VALUES (?, ?)
+    ON CONFLICT(ev_key) DO UPDATE SET ts=excluded.ts
+  `).run(evKey, now);
   return false; // false면 '이번에 처음' == 발사 OK
 }
+function deletePushSubscriptionsByNS(ns) {
+  db.prepare(`DELETE FROM push_subscriptions WHERE ns=LOWER(?)`).run(String(ns||'').toLowerCase());
+  return true;
+}
 
-module.exports.addPushSubscription = addPushSubscription;
-module.exports.removePushSubscription = removePushSubscription;
-module.exports.listPushSubscriptions = listPushSubscriptions;
-module.exports.seenPushEvent = seenPushEvent;
+// ─────────────────────────────────────────────────────────────
+// Exports
+// ─────────────────────────────────────────────────────────────
+module.exports = {
+  // raw handle (e.g., for session store)
+  db,
+
+  // users
+  createUser,
+  getUserByEmail,
+  getUserById,
+  updateUserProfile,
+  deleteUser,
+
+  // states
+  getUserState,
+  putUserState,
+  listUserNamespaces,
+  deleteUserState,
+  deleteAllStatesForEmail,
+  deleteAllStatesForUser,
+  putStateByEmail,
+
+  // util
+  withTransaction,
+
+  // push
+  addPushSubscription,
+  removePushSubscription,
+  listPushSubscriptions,
+  seenPushEvent,
+  deletePushSubscriptionsByNS,
+};
