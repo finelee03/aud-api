@@ -791,9 +791,20 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
       width: Number(req.body?.width || 0),
       height: Number(req.body?.height || 0),
       strokes: Array.isArray(req.body?.strokes) ? req.body.strokes : [],
+      // 작성자 = 저장될 NS의 사용자(이메일 기준). 세션 사용자가 아니라 'ns' 기준으로 기록.
       author: (() => {
-        const u = getUserById(req.session.uid);
-        return u ? { id: u.id, email: u.email, displayName: getDisplayNameById(u.id), avatarUrl: latestAvatarUrl(u.id) } : null;
+        // ns는 ensureUserAudlabDir(req) 위에서 이미 결정됨
+        const row = (typeof getUserByEmail === "function") ? getUserByEmail(ns) : null;
+        if (row) {
+          return {
+            id: row.id ?? null,
+            email: row.email ?? ns,
+            displayName: getDisplayNameById?.(row.id) || (row.email ? row.email.split("@")[0] : null),
+            avatarUrl: latestAvatarUrl?.(row.id) || null
+          };
+        }
+        // DB에 유저가 없어도 최소 email은 ns로 기록 (이름/아바타는 null)
+        return { id: ns, email: ns, displayName: (ns.split("@")[0] || null), avatarUrl: null };
       })(),
       createdAt: Date.now(),
       ext: imgExt,
@@ -1175,6 +1186,18 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
             displayName: meta.author.displayName ?? null,
             avatarUrl: meta.author.avatarUrl ?? null,
           };
+        // ★ 보정: 파일이 들어있는 ns와 meta.author.email이 다르면 ns 기준으로 덮어쓰기
+        if (!user || (user.email && String(user.email).toLowerCase() !== String(ns).toLowerCase())) {
+          const row = (typeof getUserByEmail === "function") ? getUserByEmail(String(ns).toLowerCase()) : null;
+          user = row ? {
+            id: row.id,
+            email: row.email,
+            displayName: getDisplayNameById?.(row.id) || (row.email ? row.email.split("@")[0] : null),
+            avatarUrl: latestAvatarUrl?.(row.id) || null,
+          } : {
+            id: ns, email: ns, displayName: (String(ns).split("@")[0] || null), avatarUrl: null
+          };
+        }
         } else {
           const nsNum = Number(ns);
           if (Number.isFinite(nsNum)) {
