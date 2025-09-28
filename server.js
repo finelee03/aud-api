@@ -947,47 +947,57 @@ try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
 
 // [NEW] 관리자 리더보드 (Top10): 포스팅 수 / 받은 투표 수 / 투표 일치율
+// server.js — fix admin leaderboards typos
+// (이 블록만 기존 adminRouter.get("/admin/leaderboards", ...) 본문과 교체)
+
 adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
   try {
     if (!fs.existsSync(AUDLAB_ROOT)) {
       return res.json({ ok:true, postsTop10:[], votesTop10:[], rateTop10:[], totalAccounts:0 });
     }
+
     const VOTE_LABELS = new Set(["thump","miro","whee","track","echo","portal"]);
     const winnersOf = (counts) => {
-      const entries = Object.entries(counts||{}).filter(([k])=>VOTE_LABELS.has(k));
+      const entries = Object.entries(counts || {}).filter(([k]) => VOTE_LABELS.has(k));
       if (!entries.length) return [];
-      const max = Math.max(...entries.map(([,n])=>Number(n||0)), 0);
-      if (max<=0) return [];
-      return entries.filter(([,n])=>Number(n||0)===max).map(([k])=>k);
+      // FIX#1: Math.max(...entries.map(...), 0) — 스프레드 누락을 수정
+      const max = Math.max(...entries.map(([, n]) => Number(n || 0)), 0);
+      if (max <= 0) return [];
+      return entries.filter(([, n]) => Number(n || 0) === max).map(([k]) => k);
     };
+
     const readItemsOfNS = (ns) => {
       const dir = path.join(AUDLAB_ROOT, encodeURIComponent(ns));
       if (!fs.existsSync(dir)) return [];
       return fs.readdirSync(dir)
         .filter(f => f.endsWith(".json") && f !== "_index.json")
         .map(f => {
-          const id = f.replace(/\.json$/i,"");
+          const id = f.replace(/\.json$/i, "");
           let label = "";
-          try { label = String(JSON.parse(fs.readFileSync(path.join(dir,f),"utf8"))?.label||"").trim(); } catch {}
+          try { label = String(JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))?.label || "").trim(); } catch {}
           return { id, label };
         });
     };
-    const nses = fs.readdirSync(AUDLAB_ROOT, { withFileTypes:true })
-      .filter(d=>d.isDirectory()).map(d=>decodeURIComponent(d.name));
+
+    const nses = fs.readdirSync(AUDLAB_ROOT, { withFileTypes: true })
+      .filter(d => d.isDirectory()).map(d => decodeURIComponent(d.name));
+
     const stmtCounts = db.prepare('SELECT label, COUNT(*) n FROM item_votes WHERE item_id=? GROUP BY label');
+
     const perNS = [];
     for (const ns of nses) {
       const items = readItemsOfNS(ns);
       let posts = items.length, votes = 0, participated = 0, matched = 0;
+
       for (const it of items) {
         let counts = {};
         try {
           for (const r of stmtCounts.all(it.id)) {
-            if (VOTE_LABELS.has(r.label)) counts[r.label] = (counts[r.label]||0) + Number(r.n||0);
+            if (VOTE_LABELS.has(r.label)) counts[r.label] = (counts[r.label] || 0) + Number(r.n || 0);
           }
         } catch {}
-        const total = Object.values(counts).reduce((s,n)=>s+Number(n||0),0);
-        if (total>0) {
+        const total = Object.values(counts).reduce((s, n) => s + Number(n || 0), 0);
+        if (total > 0) {
           participated++;
           const tops = winnersOf(counts);
           if (it.label && tops.includes(it.label)) matched++;
@@ -996,38 +1006,48 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
       }
       perNS.push({ ns, posts, votes, participated, matched });
     }
+
+    // FIX#2: { ...r, rate: ... } — 객체 스프레드 오타 수정
     const withRate = perNS.map(r => ({
-      ...r, rate: r.participated>0 ? Math.round((r.matched/r.participated)*100) : 0
+      ...r,
+      rate: r.participated > 0 ? Math.round((r.matched / r.participated) * 100) : 0,
     }));
-    const pickTop = (arr, key, tie=[]) => {
-      const sorted = [...arr].sort((a,b)=>{
-        if (b[key]!==a[key]) return b[key]-a[key];
-        for (const t of tie) if (b[t]!==a[t]) return b[t]-a[t];
+
+    const pickTop = (arr, key, tie = []) => {
+      const sorted = [...arr].sort((a, b) => {
+        if (b[key] !== a[key]) return b[key] - a[key];
+        for (const t of tie) if (b[t] !== a[t]) return b[t] - a[t];
         return String(a.ns).localeCompare(String(b.ns));
       });
-      return sorted.slice(0,10);
+      return sorted.slice(0, 10);
     };
-    const postsTop10 = pickTop(withRate, "posts", ["votes","participated"]);
-    const votesTop10 = pickTop(withRate, "votes", ["posts","participated"]);
-    const rateTop10  = pickTop(withRate, "rate",  ["participated","votes"]);
-    const isEmail = s => /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(s||"").trim());
+
+    const postsTop10 = pickTop(withRate, "posts", ["votes", "participated"]);
+    const votesTop10 = pickTop(withRate, "votes", ["posts", "participated"]);
+    const rateTop10  = pickTop(withRate, "rate",  ["participated", "votes"]);
+
+    const isEmail = s => /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(s || "").trim());
     const decorate = (row) => ({
       ns: row.ns,
       displayName: isEmail(row.ns) ? row.ns.split("@")[0] : row.ns,
       email: isEmail(row.ns) ? row.ns : null,
       avatarUrl: null,
-      posts: row.posts, votes: row.votes,
-      participated: row.participated, matched: row.matched, rate: row.rate
+      posts: row.posts,
+      votes: row.votes,
+      participated: row.participated,
+      matched: row.matched,
+      rate: row.rate
     });
+
     res.json({
-      ok:true,
+      ok: true,
       postsTop10: postsTop10.map(decorate),
       votesTop10: votesTop10.map(decorate),
       rateTop10:  rateTop10 .map(decorate),
       totalAccounts: withRate.length
     });
   } catch (e) {
-    console.error("[admin/leaderboards] failed:", e?.stack||e);
+    console.error("[admin/leaderboards] failed:", e?.stack || e);
     res.status(500).json({ ok:false });
   }
 });
