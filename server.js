@@ -279,6 +279,8 @@ async function handleAccountDelete(req, res) {
   const row = getUserById(uid);
   const email = row?.email || "";
 
+  try { deleteAllStatesForEmail(email); } catch {}
+
   // 파일/디렉토리/아바타 정리
   removeUserAssets(email, uid);
 
