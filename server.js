@@ -963,78 +963,156 @@ try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
 
 // [NEW] 관리자 리더보드 (Top10): 포스팅 수 / 받은 투표 수 / 투표 일치율
-// 기존 adminRouter.get("/admin/leaderboards", ...) 전부 교체
+// === Admin Leaderboards: gallery(UPLOAD_ROOT) + audlab(AUDLAB_ROOT) 모두 집계 ===
 adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
   try {
     const EMAIL_RX = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
     const isEmail = s => EMAIL_RX.test(String(s || "").trim());
     const norm = s => String(s || "").trim().toLowerCase();
 
-    // 1) 갤러리(NS 디렉토리)만 스캔 (avatars 제외, 이메일 폴더만)
+    const EXT_IMG = ["png","jpg","jpeg","webp","gif"];
+
+    // ns → dir path helpers
+    const dirForUploadNS = (ns) => path.join(UPLOAD_ROOT, encodeURIComponent(String(ns).toLowerCase()));
+    const dirForAudlabNS  = (ns) => path.join(AUDLAB_ROOT, encodeURIComponent(String(ns).toLowerCase()));
+
+    // 1) 이메일 형태의 NS 디렉토리 나열 (avatars 제외)
     const nsDirs = [];
     if (fs.existsSync(UPLOAD_ROOT)) {
-      for (const d of fs.readdirSync(UPLOAD_ROOT, { withFileTypes: true })) {
+      for (const d of fs.readdirSync(UPLOAD_ROOT, { withFileTypes:true })) {
         if (!d.isDirectory()) continue;
         if (d.name === "avatars") continue;
         const ns = decodeURIComponent(d.name);
         if (isEmail(ns)) nsDirs.push(ns.toLowerCase());
       }
     }
+    // audlab 쪽에만 존재하는 ns도 포함
+    if (fs.existsSync(AUDLAB_ROOT)) {
+      for (const d of fs.readdirSync(AUDLAB_ROOT, { withFileTypes:true })) {
+        if (!d.isDirectory()) continue;
+        const ns = decodeURIComponent(d.name);
+        if (isEmail(ns)) {
+          const n = ns.toLowerCase();
+          if (!nsDirs.includes(n)) nsDirs.push(n);
+        }
+      }
+    }
 
-    // 2) 갤러리 인덱스에서 아이템(id/label) 읽기
-    const readGalleryItems = (ns) => {
-      const indexPath = path.join(dirForNS(ns), "_index.json");
-      let idx = [];
-      try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
-      if (!Array.isArray(idx)) return [];
-      return idx
-        .map(m => ({
-          id: String(m?.id || ""),
-          // 정답 라벨도 동일 규칙으로 정규화
-          label: norm(m?.label || "")
-        }))
-        .filter(x => x.id);
-    };
+    // 2) 갤러리(_index.json 없으면 파일 목록)에서 아이템(id/label) 읽기
+    function readGalleryItems(ns) {
+      const dir = dirForUploadNS(ns);
+      const indexPath = path.join(dir, "_index.json");
+      let out = [];
 
-    // 3) 투표 집계 (DB: item_votes) — 라벨 화이트리스트 제거
+      try {
+        const idx = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+        if (Array.isArray(idx)) {
+          out = idx.map(m => ({
+            id: String(m?.id || ""),
+            label: norm(m?.label || "")
+          })).filter(x => x.id);
+        }
+      } catch {}
+
+      // 인덱스가 비었으면 파일에서 추론
+      if (!out.length) {
+        try {
+          const files = fs.readdirSync(dir).filter(f => {
+            const low = f.toLowerCase();
+            return EXT_IMG.some(e => low.endsWith("." + e));
+          });
+          out = files.map(f => ({
+            id: f.replace(/\.(png|jpe?g|gif|webp)$/i, ""),
+            label: ""    // 갤러리 파일만으로는 정답 라벨을 알 수 없으니 빈 값
+          }));
+        } catch {}
+      }
+      return out;
+    }
+
+    // 3) audlab(_index.json 우선, 없으면 *.json 메타)에서 아이템(id/label) 읽기
+    function readAudlabItems(ns) {
+      const dir = dirForAudlabNS(ns);
+      const indexPath = path.join(dir, "_index.json");
+      let out = [];
+
+      // 인덱스 우선
+      try {
+        const idx = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+        if (Array.isArray(idx)) {
+          out = idx.map(m => ({
+            id: String(m?.id || ""),
+            label: norm(m?.label || "")
+          })).filter(x => x.id);
+        }
+      } catch {}
+
+      // 인덱스가 없거나 비면 각 아이템 JSON 스캔
+      if (!out.length) {
+        try {
+          const files = fs.readdirSync(dir).filter(f => f.endsWith(".json") && f !== "_index.json");
+          for (const jf of files) {
+            const id = jf.replace(/\.json$/i, "");
+            try {
+              const meta = JSON.parse(fs.readFileSync(path.join(dir, jf), "utf8"));
+              out.push({ id, label: norm(meta?.label || "") });
+            } catch {
+              out.push({ id, label: "" });
+            }
+          }
+        } catch {}
+      }
+      return out;
+    }
+
+    // 4) 한 NS의 아이템들을 “갤러리 + audlab”에서 모두 모으고, id 기준으로 병합(라벨 있으면 유지)
+    function readAllItems(ns) {
+      const a = readGalleryItems(ns);
+      const b = readAudlabItems(ns);
+      const map = new Map();
+      for (const it of [...a, ...b]) {
+        if (!it.id) continue;
+        const prev = map.get(it.id);
+        // 라벨 정보가 있는 쪽을 우선
+        if (!prev) map.set(it.id, it);
+        else if (!prev.label && it.label) map.set(it.id, it);
+      }
+      return [...map.values()];
+    }
+
+    // 5) 투표 집계 쿼리 (라벨 필터 없음)
     const stmtCounts = db.prepare(
-      "SELECT label, COUNT(*) AS n FROM item_votes WHERE item_id = ? GROUP BY label"
+      "SELECT label, COUNT(*) AS n FROM item_votes WHERE item_id=? GROUP BY label"
     );
 
-    // 특정 아이템에 대한 승자 라벨들 반환 (최다 득표 동점 허용)
     const winnersOf = (counts) => {
       const entries = Object.entries(counts);
       if (!entries.length) return [];
-      const max = Math.max(...entries.map(([, n]) => Number(n || 0)), 0);
+      const max = Math.max(...entries.map(([,n]) => Number(n||0)), 0);
       if (max <= 0) return [];
-      return entries
-        .filter(([, n]) => Number(n || 0) === max)
-        .map(([k]) => k);
+      return entries.filter(([,n]) => Number(n||0) === max).map(([k]) => k);
     };
 
     const perNS = [];
     for (const ns of nsDirs) {
-      const items = readGalleryItems(ns);
+      const items = readAllItems(ns);
 
       let posts = items.length;
-      let votes = 0;          // 총 투표 수
-      let participated = 0;   // 최소 1표 이상 받은 항목 수
-      let matched = 0;        // 그 중 승자 라벨이 정답과 일치한 항목 수
+      let votes = 0;
+      let participated = 0;
+      let matched = 0;
 
       for (const it of items) {
         const counts = {};
         try {
-          // 라벨 정규화 + 빈 문자열 제외
           for (const r of stmtCounts.all(it.id)) {
-            const label = norm(r.label);
-            if (!label) continue;
-            counts[label] = (counts[label] || 0) + Number(r.n || 0);
+            const lb = norm(r.label);
+            if (!lb) continue;
+            counts[lb] = (counts[lb] || 0) + Number(r.n || 0);
           }
-        } catch {
-          // DB 쿼리 실패 시 해당 아이템은 0표로 간주
-        }
+        } catch {}
 
-        const total = Object.values(counts).reduce((s, n) => s + Number(n || 0), 0);
+        const total = Object.values(counts).reduce((s,n)=>s+Number(n||0), 0);
         votes += total;
 
         if (total > 0) {
@@ -1047,15 +1125,13 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
       perNS.push({ ns, posts, votes, participated, matched });
     }
 
-    // 4) 비율 계산
     const withRate = perNS.map(r => ({
       ...r,
       rate: r.participated > 0 ? Math.round((r.matched / r.participated) * 100) : 0,
     }));
 
-    // 5) 상위 N 뽑기 (동률 보조정렬 포함)
-    const pickTop = (arr, key, tie = []) => {
-      const sorted = [...arr].sort((a, b) => {
+    const pickTop = (arr, key, tie=[]) => {
+      const sorted = [...arr].sort((a,b) => {
         if (b[key] !== a[key]) return b[key] - a[key];
         for (const t of tie) if (b[t] !== a[t]) return b[t] - a[t];
         return String(a.ns).localeCompare(String(b.ns));
@@ -1094,7 +1170,7 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
     });
   } catch (e) {
     console.error("[admin/leaderboards] failed:", e?.stack || e);
-    res.status(500).json({ ok: false });
+    res.status(500).json({ ok:false });
   }
 });
 
