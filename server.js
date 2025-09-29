@@ -1515,6 +1515,18 @@ app.get("/api/healthz", (_req, res) => {
   res.json({ ok: true, bootId: BOOT_ID });
 });
 
+// [NEW] Labels catalog (자동 노출용)
+app.get("/api/labels/all", requireLogin, (_req, res) => {
+  // 필요 시 환경변수로 치환 가능: process.env.LABEL_KEYS
+  res.json(["thump","miro","whee","track","echo","portal"]);
+});
+
+// [NEW] Jibbitz catalog (자동 노출용)
+app.get("/api/jibbitz/catalog", requireLogin, (_req, res) => {
+  // 실제로 관리한다면 DB/파일에서 읽도록 바꿔도 OK
+  res.json(["bloom","tail","cap","keyring","duck","twinkle","xmas","bunny"]);
+});
+
 // ──────────────────────────────────────────────────────────
 app.get("/api/state", requireLogin, (req, res) => {
   const ns = emailNS(req, null);
