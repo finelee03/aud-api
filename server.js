@@ -989,15 +989,20 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
       }
     }
 
+    const stmtItemsByNS = db.prepare(`
+      SELECT id, COALESCE(NULLIF(TRIM(label), ''), '') AS label
+      FROM items
+      WHERE LOWER(COALESCE(owner_ns, '')) = ?
+        OR LOWER(COALESCE(author_email, '')) = ?
+    `);
+
     // ── 2) 갤러리 인덱스에서 아이템(id/label) 읽기
     const readGalleryItems = (ns) => {
       const indexPath = path.join(dirForNS(ns), "_index.json");
       let idx = [];
       try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
       if (!Array.isArray(idx)) return [];
-      return idx
-        .map(m => ({ id:String(m?.id||""), label:String(m?.label||"") }))
-        .filter(x => x.id);
+      return idx.map(m => ({ id:String(m?.id||""), label:String(m?.label||"") })).filter(x => x.id);
     };
 
     // ── 3) 투표 집계 (DB: item_votes)
@@ -1007,14 +1012,27 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
 
     const perNS = [];
     for (const ns of nsDirs) {
-      const items = readGalleryItems(ns);
+      // DB에서 우선 수집
+      const itemsDB = stmtItemsByNS.all(ns.toLowerCase(), ns.toLowerCase())
+        .map(r => ({ id: String(r.id), label: String(r.label||'') }));
+
+      // _index.json 으로 라벨 보강 (id 기준 merge)
+      const indexItems = readGalleryItems(ns);
+      const labelMap = new Map(indexItems.map(it => [it.id, it.label]));
+      const items = (itemsDB.length ? itemsDB : indexItems).map(it => ({
+        id: it.id,
+        label: it.label || labelMap.get(it.id) || ''
+      }));
+
       let posts = items.length, votes = 0, participated = 0, matched = 0;
 
       for (const it of items) {
         const counts = {};
         try {
           for (const r of stmtCounts.all(it.id)) {
-            if (VOTE_LABELS.has(r.label)) counts[r.label] = (counts[r.label] || 0) + Number(r.n || 0);
+            if (VOTE_LABELS.has(r.label)) {
+              counts[r.label] = (counts[r.label] || 0) + Number(r.n || 0);
+            }
           }
         } catch {}
         const total = Object.values(counts).reduce((s,n)=>s+Number(n||0), 0);
