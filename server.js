@@ -60,6 +60,9 @@ const {
   normalizeLabel,
   getLabelStory,
   putLabelStory,
+  normalizeJib,
+  getJibStory,
+  putJibStory,
 } = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
@@ -1533,6 +1536,54 @@ function readLabelStory(lbRaw) {
   return { code: 200, body: { ok: true, label: lb, story } };
 }
 
+function readJibStory(jbRaw) {
+  const jb = normalizeJib(jbRaw);
+  if (!jb) return { code: 400, body: { ok: false, error: "bad_jib" } };
+  const story = getJibStory(jb) || "";
+  return { code: 200, body: { ok: true, jib: jb, story } };
+}
+
+// READ
+app.get("/api/jibbitz/:jib", requireLogin, (req, res) => {
+  const r = readJibStory(req.params.jib);
+  res.set("Cache-Control", "no-store");
+  return res.status(r.code).json(r.body);
+});
+app.get("/api/jibbitz/:jib/story", requireLogin, (req, res) => {
+  const r = readJibStory(req.params.jib);
+  res.set("Cache-Control", "no-store");
+  return res.status(r.code).json(r.body);
+});
+app.get("/api/jib/story", requireLogin, (req, res) => {
+  const r = readJibStory(req.query.jib);
+  res.set("Cache-Control", "no-store");
+  return res.status(r.code).json(r.body);
+});
+
+// WRITE
+app.put("/api/jibbitz/:jib/story", requireLogin, csrfProtection, express.json(), (req, res) => {
+  try {
+    const jb = normalizeJib(req.params.jib);
+    if (!jb) return res.status(400).json({ ok:false, error:"bad_jib" });
+    const saved = putJibStory(jb, String(req.body?.story || ""));
+    io.to(`jib:${jb}`).emit("jib:story-updated", { jib: jb, story: saved.story });
+    return res.json({ ok:true, jib: jb, story: saved.story, updatedAt: saved.updatedAt });
+  } catch {
+    return res.status(500).json({ ok:false, error:"save_failed" });
+  }
+});
+app.post("/api/jib/story", requireLogin, csrfProtection, express.json(), (req, res) => {
+  try {
+    const jb = normalizeJib(req.body?.jib);
+    if (!jb) return res.status(400).json({ ok:false, error:"bad_jib" });
+    const saved = putJibStory(jb, String(req.body?.story || ""));
+    io.to(`jib:${jb}`).emit("jib:story-updated", { jib: jb, story: saved.story });
+    return res.json({ ok:true, jib: jb, story: saved.story, updatedAt: saved.updatedAt });
+  } catch {
+    return res.status(500).json({ ok:false, error:"save_failed" });
+  }
+});
+
 // GET: /api/labels/:label  (스토리 조회)
 app.get("/api/labels/:label", requireLogin, (req, res) => {
   const r = readLabelStory(req.params.label);
@@ -2594,6 +2645,17 @@ io.on("connection", (sock) => {
       if (ack) ack({ ok: true, label: lb, updatedAt: saved.updatedAt });
     } catch {
       if (ack) ack({ ok: false, error: "update_failed" });
+    }
+  });
+  sock.on("jib:update", (payload = {}, ack) => {
+    try {
+      const jb = normalizeJib(payload.jib);
+      if (!jb) { ack && ack({ ok:false, error:"bad_jib" }); return; }
+      const saved = putJibStory(jb, String(payload.story || ""));
+      io.to(`jib:${jb}`).emit("jib:story-updated", { jib: jb, story: saved.story });
+      ack && ack({ ok:true, jib: jb, updatedAt: saved.updatedAt });
+    } catch {
+      ack && ack({ ok:false, error:"update_failed" });
     }
   });
 });

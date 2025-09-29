@@ -48,13 +48,15 @@ CREATE TABLE IF NOT EXISTS user_states (
 
 CREATE INDEX IF NOT EXISTS idx_user_states_updated
 ON user_states (updated_at DESC);
-`);
 
-// [ADD] 라벨 스토리 저장소 (label → story 텍스트)
-/* why: labeladmin에서 편집한 본문을 label 페이지가 읽고, 실시간 반영하기 위한 단일 소스 */
-db.exec(`
 CREATE TABLE IF NOT EXISTS label_stories (
   label       TEXT PRIMARY KEY,
+  story       TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS jibbitz_stories (
+  jib         TEXT PRIMARY KEY,
   story       TEXT NOT NULL,
   updated_at  INTEGER NOT NULL
 );
@@ -91,6 +93,12 @@ function normalizeNS(ns) {
 /* why: 서버/클라에서 동일한 규칙 사용, 임의 SQL 주입/오타 방지 */
 function normalizeLabel(label) {
   const s = String(label || "").trim().toLowerCase();
+  if (!/^[a-z0-9-]{1,32}$/.test(s)) return null;
+  return s;
+}
+function normalizeJib(jib) {
+  const s = String(jib || "").trim().toLowerCase();
+  // why: label과 동일한 제약(소문자, 숫자, 하이픈, 1~32자)
   if (!/^[a-z0-9-]{1,32}$/.test(s)) return null;
   return s;
 }
@@ -155,6 +163,17 @@ const stmtPutLabelStory = db.prepare(`
   INSERT INTO label_stories (label, story, updated_at)
   VALUES (?, ?, ?)
   ON CONFLICT(label) DO UPDATE SET
+    story = excluded.story,
+    updated_at = excluded.updated_at
+`);
+
+const stmtGetJibStory = db.prepare(`
+  SELECT story FROM jibbitz_stories WHERE jib = ?
+`);
+const stmtPutJibStory = db.prepare(`
+  INSERT INTO jibbitz_stories (jib, story, updated_at)
+  VALUES (?, ?, ?)
+  ON CONFLICT(jib) DO UPDATE SET
     story = excluded.story,
     updated_at = excluded.updated_at
 `);
@@ -386,6 +405,21 @@ function putLabelStory(label, story) {
   return { label: lb, story: txt, updatedAt: now };
 }
 
+function getJibStory(jib) {
+  const k = normalizeJib(jib);
+  if (!k) return "";
+  const row = stmtGetJibStory.get(k);
+  return row?.story || "";
+}
+function putJibStory(jib, story) {
+  const k = normalizeJib(jib);
+  if (!k) throw new Error("bad_jib");
+  const txt = String(story || "").slice(0, 10000);
+  const now = Date.now();
+  stmtPutJibStory.run(k, txt, now);
+  return { jib: k, story: txt, updatedAt: now };
+}
+
 // ─────────────────────────────────────────────────────────────
 // Exports
 // ─────────────────────────────────────────────────────────────
@@ -423,4 +457,8 @@ module.exports = {
   normalizeLabel,
   getLabelStory,
   putLabelStory,
+
+  normalizeJib,
+  getJibStory,
+  putJibStory,
 };
