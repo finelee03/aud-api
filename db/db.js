@@ -30,7 +30,7 @@ db.pragma("busy_timeout = 5000");
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  email         TEXT    NOT NULL UNIQUE,     -- stored lowercased
+  email         TEXT    NOT NULL UNIQUE,
   pw_hash       TEXT    NOT NULL,
   created_at    INTEGER NOT NULL,
   display_name  TEXT,
@@ -39,8 +39,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS user_states (
   user_id     INTEGER NOT NULL,
-  ns          TEXT    NOT NULL,              -- namespace (e.g., email or custom)
-  state_json  TEXT    NOT NULL,              -- serialized JSON
+  ns          TEXT    NOT NULL,
+  state_json  TEXT    NOT NULL,
   updated_at  INTEGER NOT NULL,
   PRIMARY KEY (user_id, ns),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -48,6 +48,16 @@ CREATE TABLE IF NOT EXISTS user_states (
 
 CREATE INDEX IF NOT EXISTS idx_user_states_updated
 ON user_states (updated_at DESC);
+`);
+
+// [ADD] 라벨 스토리 저장소 (label → story 텍스트)
+/* why: labeladmin에서 편집한 본문을 label 페이지가 읽고, 실시간 반영하기 위한 단일 소스 */
+db.exec(`
+CREATE TABLE IF NOT EXISTS label_stories (
+  label       TEXT PRIMARY KEY,
+  story       TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
 `);
 
 // ─────────────────────────────────────────────────────────────
@@ -76,6 +86,13 @@ function normalizeEmail(email) {
 }
 function normalizeNS(ns) {
   return String(ns || "").trim().toLowerCase();
+}
+// [ADD] 라벨 키 정규화
+/* why: 서버/클라에서 동일한 규칙 사용, 임의 SQL 주입/오타 방지 */
+function normalizeLabel(label) {
+  const s = String(label || "").trim().toLowerCase();
+  if (!/^[a-z0-9-]{1,32}$/.test(s)) return null;
+  return s;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -130,6 +147,18 @@ const stmtDeleteAllStatesForUser = db.prepare(`
   DELETE FROM user_states WHERE user_id = ?
 `);
 
+// [ADD] label_stories prepared statements
+const stmtGetLabelStory = db.prepare(`
+  SELECT story FROM label_stories WHERE label = ?
+`);
+const stmtPutLabelStory = db.prepare(`
+  INSERT INTO label_stories (label, story, updated_at)
+  VALUES (?, ?, ?)
+  ON CONFLICT(label) DO UPDATE SET
+    story = excluded.story,
+    updated_at = excluded.updated_at
+`);
+
 // ─────────────────────────────────────────────────────────────
 // User APIs
 // ─────────────────────────────────────────────────────────────
@@ -144,7 +173,6 @@ function createUser(email, pwHash) {
   const info = stmtInsertUser.run(normEmail, pwHash, createdAt);
   const userId = Number(info.lastInsertRowid);
 
-  // 기본 display_name = 이메일 로컬파트
   try {
     const local = String(normEmail).split("@")[0] || "user";
     db.prepare(
@@ -277,11 +305,9 @@ function deleteUser(userId) {
 
   return withTransaction(() => {
     try {
-      // 이메일 확보(why: ns 기반 리소스 정리)
       const urow = stmtGetUserById.get(userId);
       const email = urow ? normalizeEmail(urow.email) : "";
 
-      // 상태/구독 선정리(멱등)
       try { deleteAllStatesForUser(userId); } catch {}
       try { if (email) deletePushSubscriptionsByNS(email); } catch {}
 
@@ -304,7 +330,7 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   created_at  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS push_events (
-  ev_key   TEXT PRIMARY KEY,   -- e.g., "like:ITEM:ACTORNS"
+  ev_key   TEXT PRIMARY KEY,
   ts       INTEGER NOT NULL
 );
 `);
@@ -335,7 +361,7 @@ function seenPushEvent(evKey, ttlMs = 1000*60*60*24) {
     INSERT INTO push_events (ev_key, ts) VALUES (?, ?)
     ON CONFLICT(ev_key) DO UPDATE SET ts=excluded.ts
   `).run(evKey, now);
-  return false; // false면 '이번에 처음' == 발사 OK
+  return false;
 }
 function deletePushSubscriptionsByNS(ns) {
   db.prepare(`DELETE FROM push_subscriptions WHERE ns=LOWER(?)`).run(String(ns||'').toLowerCase());
@@ -343,10 +369,28 @@ function deletePushSubscriptionsByNS(ns) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Label Story APIs
+// ─────────────────────────────────────────────────────────────
+function getLabelStory(label) {
+  const lb = normalizeLabel(label);
+  if (!lb) return "";
+  const row = stmtGetLabelStory.get(lb);
+  return row?.story || "";
+}
+function putLabelStory(label, story) {
+  const lb = normalizeLabel(label);
+  if (!lb) throw new Error("bad_label");
+  const txt = String(story || "").slice(0, 10000); // why: 악성/오타 폭주 방지 상한
+  const now = Date.now();
+  stmtPutLabelStory.run(lb, txt, now);
+  return { label: lb, story: txt, updatedAt: now };
+}
+
+// ─────────────────────────────────────────────────────────────
 // Exports
 // ─────────────────────────────────────────────────────────────
 module.exports = {
-  // raw handle (e.g., for session store)
+  // raw handle
   db,
 
   // users
@@ -374,4 +418,9 @@ module.exports = {
   listPushSubscriptions,
   seenPushEvent,
   deletePushSubscriptionsByNS,
+
+  // [ADD] labels
+  normalizeLabel,
+  getLabelStory,
+  putLabelStory,
 };

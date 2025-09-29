@@ -55,7 +55,11 @@ const {
   putUserState,
   putStateByEmail,
   deleteUser,
-  deleteAllStatesForEmail,   // [ADD]
+  deleteAllStatesForEmail,
+  // [ADD] ↓↓↓
+  normalizeLabel,
+  getLabelStory,
+  putLabelStory,
 } = require("./db");
 
 const { startBleBridge } = require("./ble-bridge");
@@ -1516,6 +1520,67 @@ app.get("/api/healthz", (_req, res) => {
 });
 
 // [NEW] Labels catalog (자동 노출용)
+
+// ──────────────────────────────────────────────────────────
+// Label Story REST (read/write)
+// ──────────────────────────────────────────────────────────
+
+// 공통 리더
+function readLabelStory(lbRaw) {
+  const lb = normalizeLabel(lbRaw);
+  if (!lb) return { code: 400, body: { ok: false, error: "bad_label" } };
+  const story = getLabelStory(lb) || "";
+  return { code: 200, body: { ok: true, label: lb, story } };
+}
+
+// GET: /api/labels/:label  (스토리 조회)
+app.get("/api/labels/:label", requireLogin, (req, res) => {
+  const r = readLabelStory(req.params.label);
+  res.set("Cache-Control", "no-store");
+  return res.status(r.code).json(r.body);
+});
+
+// GET: /api/labels/:label/story  (스토리 조회 - alias)
+app.get("/api/labels/:label/story", requireLogin, (req, res) => {
+  const r = readLabelStory(req.params.label);
+  res.set("Cache-Control", "no-store");
+  return res.status(r.code).json(r.body);
+});
+
+// GET: /api/label/story?label=xxx  (레거시 폴백)
+app.get("/api/label/story", requireLogin, (req, res) => {
+  const r = readLabelStory(req.query.label);
+  res.set("Cache-Control", "no-store");
+  return res.status(r.code).json(r.body);
+});
+
+// PUT: /api/labels/:label/story  (스토리 저장)
+app.put("/api/labels/:label/story", requireLogin, csrfProtection, express.json(), (req, res) => {
+  try {
+    const lb = normalizeLabel(req.params.label);
+    if (!lb) return res.status(400).json({ ok: false, error: "bad_label" });
+    const saved = putLabelStory(lb, String(req.body?.story || ""));
+    io.to(`label:${lb}`).emit("label:story-updated", { label: lb, story: saved.story });
+    return res.json({ ok: true, label: lb, story: saved.story, updatedAt: saved.updatedAt });
+  } catch {
+    return res.status(500).json({ ok: false, error: "save_failed" });
+  }
+});
+
+// POST: /api/label/story  (레거시 폴백: body {label, story})
+app.post("/api/label/story", requireLogin, csrfProtection, express.json(), (req, res) => {
+  try {
+    const lb = normalizeLabel(req.body?.label);
+    if (!lb) return res.status(400).json({ ok: false, error: "bad_label" });
+    const saved = putLabelStory(lb, String(req.body?.story || ""));
+    io.to(`label:${lb}`).emit("label:story-updated", { label: lb, story: saved.story });
+    return res.json({ ok: true, label: lb, story: saved.story, updatedAt: saved.updatedAt });
+  } catch {
+    return res.status(500).json({ ok: false, error: "save_failed" });
+  }
+});
+
+
 app.get("/api/labels/all", requireLogin, (_req, res) => {
   // 필요 시 환경변수로 치환 가능: process.env.LABEL_KEYS
   res.json(["thump","miro","whee","track","echo","portal"]);
@@ -2514,6 +2579,21 @@ io.on("connection", (sock) => {
       const id = String(it || "");
       if (!id) continue;
       sock.leave(`item:${id}`);
+    }
+  });
+
+  sock.on("label:update", (payload = {}, ack) => {
+    try {
+      const lb = normalizeLabel(payload.label);
+      if (!lb) {
+        if (ack) ack({ ok: false, error: "bad_label" });
+        return;
+      }
+      const saved = putLabelStory(lb, String(payload.story || ""));
+      io.to(`label:${lb}`).emit("label:story-updated", { label: lb, story: saved.story });
+      if (ack) ack({ ok: true, label: lb, updatedAt: saved.updatedAt });
+    } catch {
+      if (ack) ack({ ok: false, error: "update_failed" });
     }
   });
 });
