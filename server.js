@@ -963,97 +963,99 @@ try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
 
 // [NEW] 관리자 리더보드 (Top10): 포스팅 수 / 받은 투표 수 / 투표 일치율
-// server.js — fix admin leaderboards typos
-// REPLACE THIS WHOLE BLOCK
+// 기존 adminRouter.get("/admin/leaderboards", ...) 전부 교체
 adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
   try {
     const EMAIL_RX = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
-    const isEmail = s => EMAIL_RX.test(String(s||"").trim());
-    const VOTE_LABELS = new Set(["thump","miro","whee","track","echo","portal"]);
-    const winnersOf = (counts) => {
-      const entries = Object.entries(counts||{}).filter(([k])=>VOTE_LABELS.has(k));
-      if (!entries.length) return [];
-      const max = Math.max(...entries.map(([,n]) => Number(n||0)), 0);
-      if (max <= 0) return [];
-      return entries.filter(([,n]) => Number(n||0) === max).map(([k]) => k);
-    };
+    const isEmail = s => EMAIL_RX.test(String(s || "").trim());
+    const norm = s => String(s || "").trim().toLowerCase();
 
-    // ── 1) 갤러리(NS 디렉토리)만 스캔
+    // 1) 갤러리(NS 디렉토리)만 스캔 (avatars 제외, 이메일 폴더만)
     const nsDirs = [];
     if (fs.existsSync(UPLOAD_ROOT)) {
-      for (const d of fs.readdirSync(UPLOAD_ROOT, { withFileTypes:true })) {
+      for (const d of fs.readdirSync(UPLOAD_ROOT, { withFileTypes: true })) {
         if (!d.isDirectory()) continue;
-        if (d.name === "avatars") continue;               // 아바타 제외
+        if (d.name === "avatars") continue;
         const ns = decodeURIComponent(d.name);
-        if (isEmail(ns)) nsDirs.push(ns.toLowerCase());   // 이메일 형태만
+        if (isEmail(ns)) nsDirs.push(ns.toLowerCase());
       }
     }
 
-    const stmtItemsByNS = db.prepare(`
-      SELECT id, COALESCE(NULLIF(TRIM(label), ''), '') AS label
-      FROM items
-      WHERE LOWER(COALESCE(owner_ns, '')) = ?
-        OR LOWER(COALESCE(author_email, '')) = ?
-    `);
-
-    // ── 2) 갤러리 인덱스에서 아이템(id/label) 읽기
+    // 2) 갤러리 인덱스에서 아이템(id/label) 읽기
     const readGalleryItems = (ns) => {
       const indexPath = path.join(dirForNS(ns), "_index.json");
       let idx = [];
       try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
       if (!Array.isArray(idx)) return [];
-      return idx.map(m => ({ id:String(m?.id||""), label:String(m?.label||"") })).filter(x => x.id);
+      return idx
+        .map(m => ({
+          id: String(m?.id || ""),
+          // 정답 라벨도 동일 규칙으로 정규화
+          label: norm(m?.label || "")
+        }))
+        .filter(x => x.id);
     };
 
-    // ── 3) 투표 집계 (DB: item_votes)
+    // 3) 투표 집계 (DB: item_votes) — 라벨 화이트리스트 제거
     const stmtCounts = db.prepare(
-      "SELECT label, COUNT(*) n FROM item_votes WHERE item_id=? GROUP BY label"
+      "SELECT label, COUNT(*) AS n FROM item_votes WHERE item_id = ? GROUP BY label"
     );
+
+    // 특정 아이템에 대한 승자 라벨들 반환 (최다 득표 동점 허용)
+    const winnersOf = (counts) => {
+      const entries = Object.entries(counts);
+      if (!entries.length) return [];
+      const max = Math.max(...entries.map(([, n]) => Number(n || 0)), 0);
+      if (max <= 0) return [];
+      return entries
+        .filter(([, n]) => Number(n || 0) === max)
+        .map(([k]) => k);
+    };
 
     const perNS = [];
     for (const ns of nsDirs) {
-      // DB에서 우선 수집
-      const itemsDB = stmtItemsByNS.all(ns.toLowerCase(), ns.toLowerCase())
-        .map(r => ({ id: String(r.id), label: String(r.label||'') }));
+      const items = readGalleryItems(ns);
 
-      // _index.json 으로 라벨 보강 (id 기준 merge)
-      const indexItems = readGalleryItems(ns);
-      const labelMap = new Map(indexItems.map(it => [it.id, it.label]));
-      const items = (itemsDB.length ? itemsDB : indexItems).map(it => ({
-        id: it.id,
-        label: it.label || labelMap.get(it.id) || ''
-      }));
-
-      let posts = items.length, votes = 0, participated = 0, matched = 0;
+      let posts = items.length;
+      let votes = 0;          // 총 투표 수
+      let participated = 0;   // 최소 1표 이상 받은 항목 수
+      let matched = 0;        // 그 중 승자 라벨이 정답과 일치한 항목 수
 
       for (const it of items) {
         const counts = {};
         try {
+          // 라벨 정규화 + 빈 문자열 제외
           for (const r of stmtCounts.all(it.id)) {
-            if (VOTE_LABELS.has(r.label)) {
-              counts[r.label] = (counts[r.label] || 0) + Number(r.n || 0);
-            }
+            const label = norm(r.label);
+            if (!label) continue;
+            counts[label] = (counts[label] || 0) + Number(r.n || 0);
           }
-        } catch {}
-        const total = Object.values(counts).reduce((s,n)=>s+Number(n||0), 0);
+        } catch {
+          // DB 쿼리 실패 시 해당 아이템은 0표로 간주
+        }
+
+        const total = Object.values(counts).reduce((s, n) => s + Number(n || 0), 0);
+        votes += total;
+
         if (total > 0) {
           participated++;
           const tops = winnersOf(counts);
           if (it.label && tops.includes(it.label)) matched++;
         }
-        votes += total;
       }
 
       perNS.push({ ns, posts, votes, participated, matched });
     }
 
+    // 4) 비율 계산
     const withRate = perNS.map(r => ({
       ...r,
       rate: r.participated > 0 ? Math.round((r.matched / r.participated) * 100) : 0,
     }));
 
-    const pickTop = (arr, key, tie=[]) => {
-      const sorted = [...arr].sort((a,b) => {
+    // 5) 상위 N 뽑기 (동률 보조정렬 포함)
+    const pickTop = (arr, key, tie = []) => {
+      const sorted = [...arr].sort((a, b) => {
         if (b[key] !== a[key]) return b[key] - a[key];
         for (const t of tie) if (b[t] !== a[t]) return b[t] - a[t];
         return String(a.ns).localeCompare(String(b.ns));
@@ -1073,7 +1075,9 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
         participated: row.participated,
         matched: row.matched,
         rate: row.rate,
-        author: email ? { email, displayName: email.split("@")[0], avatarUrl: null, id: null } : null
+        author: email
+          ? { email, displayName: email.split("@")[0], avatarUrl: null, id: null }
+          : null
       };
     };
 
@@ -1090,21 +1094,7 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
     });
   } catch (e) {
     console.error("[admin/leaderboards] failed:", e?.stack || e);
-    res.status(500).json({ ok:false });
-  }
-});
-
-
-// 업로드된 NS 리스트
-adminRouter.get("/admin/audlab/nses", requireAdmin, (req, res) => {
-  try {
-    const dirs = fs.readdirSync(AUDLAB_ROOT, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => decodeURIComponent(d.name))
-      .sort();
-    res.json({ ok:true, items: dirs });
-  } catch {
-    res.status(500).json({ ok:false, error:"SERVER_ERROR" });
+    res.status(500).json({ ok: false });
   }
 });
 
