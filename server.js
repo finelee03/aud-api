@@ -116,6 +116,25 @@ const app = express();
 
 app.set('trust proxy', 1);
 
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Vary", "Origin");
+  }
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, X-CSRF-Token"
+  );
+  res.header("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS");
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+
 function ensureUserAudlabDir(req) {
   const ns = emailNS(req, null);           // ✅ 이메일 NS 고정
   if (!ns) return null;
@@ -1131,12 +1150,6 @@ app.use("/uploads", express.static(UPLOAD_ROOT, {
     res.set("Cache-Control", "public, max-age=31536000, immutable");
   }
 }));
-app.options(/^\/uploads\/.*$/, (req, res) => {
-  res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Range, Content-Type");
-  res.status(204).end();
-});
 
 // === Admin-only endpoints (audlab) ===
 const adminRouter = express.Router();
