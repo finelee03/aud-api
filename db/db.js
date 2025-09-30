@@ -27,6 +27,7 @@ db.pragma("busy_timeout = 5000");
 // ─────────────────────────────────────────────────────────────
 /** Schema (최신 스키마 기준으로 CREATE) */
 // ─────────────────────────────────────────────────────────────
+// file: db.js  (PATCH — replace the first db.exec(`...`) schema block with this exact block)
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,8 +60,9 @@ CREATE TABLE IF NOT EXISTS jibbitz_stories (
   jib         TEXT PRIMARY KEY,
   story       TEXT NOT NULL,
   updated_at  INTEGER NOT NULL
+);
 
-  CREATE TABLE IF NOT EXISTS audlab_records (
+CREATE TABLE IF NOT EXISTS audlab_records (
   id           TEXT PRIMARY KEY,
   ns           TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
@@ -71,10 +73,11 @@ CREATE TABLE IF NOT EXISTS jibbitz_stories (
   ext          TEXT NOT NULL,
   mime         TEXT NOT NULL
 );
+
 CREATE INDEX IF NOT EXISTS idx_audlab_records_ns_time
 ON audlab_records (ns, created_at DESC);
-);
 `);
+
 
 // ─────────────────────────────────────────────────────────────
 // One-time migrations (구버전 DB 대응)
