@@ -1142,9 +1142,11 @@ app.post(
 
 app.use("/uploads", express.static(UPLOAD_ROOT, {
   setHeaders(res){
-    res.set("Access-Control-Allow-Origin", "*");
-    res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-    res.set("Access-Control-Allow-Headers", "Range, Content-Type");
+    if (!res.getHeader("Access-Control-Allow-Origin")) {
+      res.set("Access-Control-Allow-Origin", "*");
+      res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+      res.set("Access-Control-Allow-Headers", "Range, Content-Type");
+    }
     res.set("Cross-Origin-Resource-Policy", "cross-origin");
     res.set("Accept-Ranges", "bytes");
     res.set("Cache-Control", "public, max-age=31536000, immutable");
