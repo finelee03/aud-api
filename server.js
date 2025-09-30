@@ -885,7 +885,8 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
       mime: previewUrl ? (previewUrl.endsWith(".png") ? "image/png"
                  : previewUrl.endsWith(".webp") ? "image/webp"
                  : previewUrl.endsWith(".jpg") || previewUrl.endsWith(".jpeg") ? "image/jpeg"
-                 : null) : null
+                 : null) : null,
+      previewDataURL: previewRaw || null
     };
     fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(meta));
 
@@ -1432,6 +1433,7 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
         ...(vidExt ? { video: `/uploads/audlab/${safeNs}/${id}.${vidExt}` } : {}),
         ...(audExt ? { audio: `/uploads/audlab/${safeNs}/${id}.${audExt}` } : {}),
         user,
+        previewDataURL: meta?.previewDataURL || null,
       };
       return out;
     });
@@ -1543,6 +1545,7 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
           mime: EXT_MIME[imgExt] || meta?.mime || null,
           audioExt: audExt || null,
           accepted: !!meta?.accepted,
+          previewDataURL: meta?.previewDataURL || null,
         });
       }
     }
