@@ -1474,13 +1474,13 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
     if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
     const dir   = path.join(AUDLAB_ROOT, nsSafe(ns));
     const jPath = path.join(dir, `${id}.json`);
-    let j = {};
-    if (fs.existsSync(jPath)) { try { j = JSON.parse(fs.readFileSync(jPath, "utf8")); } catch {} }
+    if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
+    const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
     const pointCount = (j.strokes||[]).reduce((s, st)=>s+(st.points?.length||0), 0);
 
     const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || j.ext || "png";
     const vidExt = findFirstExisting(dir, id, ["webm"]) || (j.ext === "webm" ? "webm" : null);
-    const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]) || j.audioExt || null;
+    const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]) || j.audioExt || null;
 
     res.json({
       ok:true, ns, id,
@@ -1509,8 +1509,8 @@ adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res
 
     if (!hit) {
       const jPath = path.join(dir, `${id}.json`);
-      let j = {};
-    if (fs.existsSync(jPath)) { try { j = JSON.parse(fs.readFileSync(jPath, "utf8")); } catch {} }
+      if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
+      const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
       hit = {
         id,
         ns,
