@@ -102,32 +102,7 @@ function dirForNS(ns) {
 
 const BOOT_ID = uuid();
 const app = express();
-if (!app._uploads_served) {
-  // ★ /uploads 에도 오리진별 CORS 헤더 동적 부여 (쿠키 모드 호환)
-  app.use("/uploads", (req, res, next) => {
-    try {
-      const origin = String(req.get("origin") || "").replace(/\/$/, "").toLowerCase();
-      if (CROSS_SITE) {
-        // ALLOWED_ORIGINS 비워두면 모든 오리진 허용
-        const ok = !ALLOWED_ORIGINS.length || ALLOWED_ORIGINS.includes(origin);
-        if (ok && origin) {
-          res.setHeader("Access-Control-Allow-Origin", origin);
-          res.setHeader("Access-Control-Allow-Credentials", "true");
-          res.setHeader("Vary", "Origin");
-        }
-      } else {
-        // same-site 에서는 굳이 credentials 필요없음
-        res.setHeader("Access-Control-Allow-Origin", "*");
-      }
-    } catch {}
-    return next();
-  }, express.static(UPLOAD_ROOT, {
-    immutable: false,
-    maxAge: "365d",
-    fallthrough: true,
-  }));
-  app._uploads_served = true;
-}
+
 app.set('trust proxy', 1);
 
 function ensureUserAudlabDir(req) {
