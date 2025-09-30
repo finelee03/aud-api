@@ -806,6 +806,25 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
       previewUrl = `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`;
     }
 
+    // 2.5) 오디오 dataURL(선택) 저장
+    let audioUrl = "";
+    let audioExt = null;
+    const audioRaw = req.body?.audioDataURL || "";
+    if (audioRaw) {
+      const decodedAud = decodeDataURL(audioRaw);
+      if (!decodedAud || !/^audio\//.test(decodedAud.mime) || !isAllowedAudioMime(decodedAud.mime)) {
+        return res.status(400).json({ ok:false, error:"bad_audio_mime" });
+      }
+      // why: 악성/오류 방지; 클라 기본 128kbps/수초 수준이면 수 MB
+      if (decodedAud.buf.length > 20 * 1024 * 1024) {
+        return res.status(413).json({ ok:false, error:"audio_too_large" });
+      }
+      const aExt = decodedAud.ext || "webm"; // webm/ogg/mp3/wav/m4a 등
+      fs.writeFileSync(path.join(dir, `${id}.${aExt}`), decodedAud.buf);
+      audioExt = aExt;
+      audioUrl = `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${aExt}`;
+    }
+
     // 3) 타이밍/메타
     const width      = Number(req.body?.width  || 0);
     const height     = Number(req.body?.height || 0);
@@ -839,7 +858,8 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
       mime: previewUrl ? (previewUrl.endsWith(".png") ? "image/png"
                  : previewUrl.endsWith(".webp") ? "image/webp"
                  : previewUrl.endsWith(".jpg") || previewUrl.endsWith(".jpeg") ? "image/jpeg"
-                 : null) : null
+                 : null) : null,
+      audioExt: audioExt || null
     };
     fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(meta));
 
@@ -852,7 +872,8 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
       previewUrl: previewUrl || null,
       // 레거시 키(기존 프런트가 기대할 수도 있음)
       json:  `${base}.json`,
-      ...(previewUrl ? { image: previewUrl } : {})
+      ...(previewUrl ? { image: previewUrl } : {}),
+      ...(audioUrl   ? { audio: audioUrl   } : {})
     });
   } catch (e) {
     return res.status(500).json({ ok:false, error:"submit_failed" });
@@ -955,7 +976,16 @@ app.get("/api/audlab/list", requireLogin, (req, res) => {
     const items = ids.slice(0, 200).map(id => {
       const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
       const vidExt = findFirstExisting(dir, id, ["webm"]); // video/webm
-      const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]); // 순수 오디오
+      let audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]); // 순수 오디오
+      // failover: 메타의 audioExt(webm 포함) 사용
+      if (!audExt) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(path.join(dir, `${id}.json`), "utf8"));
+          if (meta?.audioExt && typeof meta.audioExt === "string") {
+            audExt = meta.audioExt.toLowerCase();
+          }
+        } catch {}
+      }
       const base = `/uploads/audlab/${encodeURIComponent(ns)}/${id}`;
       return {
         id,
