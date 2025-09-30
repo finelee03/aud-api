@@ -1130,7 +1130,7 @@ app.use("/uploads", express.static(UPLOAD_ROOT, {
     res.set("Cache-Control", "public, max-age=31536000, immutable");
   }
 }));
-app.options("/uploads/*", (req, res) => {
+app.options(/^\/uploads\/.*$/, (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   res.set("Access-Control-Allow-Headers", "Range, Content-Type");
