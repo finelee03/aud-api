@@ -375,14 +375,12 @@ app.use(
         "connect-src": connectSrc,
         "img-src": [
           "'self'", "data:", "blob:",
-          ...((process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "")
-              .split(",").map(s => s.trim()).filter(Boolean))
+          ...(process.env.ALLOWED_ORIGINS||"").split(",").map(s=>s.trim()).filter(Boolean)
         ],
         "media-src": [
           "'self'", "data:", "blob:",
-          ...((process.env.WEB_ORIGIN || process.env.ALLOWED_ORIGINS || "")
-              .split(",").map(s => s.trim()).filter(Boolean))
-        ],
+          ...(process.env.ALLOWED_ORIGINS||"").split(",").map(s=>s.trim()).filter(Boolean)
+         ],
         "worker-src": ["'self'", "blob:"],
       },
     },
