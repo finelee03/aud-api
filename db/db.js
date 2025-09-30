@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS jibbitz_stories (
   jib         TEXT PRIMARY KEY,
   story       TEXT NOT NULL,
   updated_at  INTEGER NOT NULL
+
+  CREATE TABLE IF NOT EXISTS audlab_records (
+  id           TEXT PRIMARY KEY,
+  ns           TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  duration_ms  INTEGER NOT NULL,
+  width        INTEGER NOT NULL,
+  height       INTEGER NOT NULL,
+  fps          INTEGER NOT NULL,
+  ext          TEXT NOT NULL,
+  mime         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audlab_records_ns_time
+ON audlab_records (ns, created_at DESC);
 );
 `);
 
@@ -177,6 +191,28 @@ const stmtPutJibStory = db.prepare(`
     story = excluded.story,
     updated_at = excluded.updated_at
 `);
+const stmtPutAudlab = db.prepare(`
+  INSERT INTO audlab_records (id, ns, created_at, duration_ms, width, height, fps, ext, mime)
+  VALUES (?, LOWER(?), ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    ns          = excluded.ns,
+    created_at  = excluded.created_at,
+    duration_ms = excluded.duration_ms,
+    width       = excluded.width,
+    height      = excluded.height,
+    fps         = excluded.fps,
+    ext         = excluded.ext,
+    mime        = excluded.mime
+`);
+const stmtListAudlab = db.prepare(`
+  SELECT id, ns, created_at, duration_ms, width, height, fps, ext, mime
+  FROM audlab_records
+  WHERE ns = LOWER(?)
+  ORDER BY created_at DESC
+  LIMIT ? OFFSET ?
+`);
+const stmtDeleteAudlabByNS = db.prepare(`DELETE FROM audlab_records WHERE ns = LOWER(?)`);
+const stmtDeleteAudlabById = db.prepare(`DELETE FROM audlab_records WHERE id = ?`);
 
 // ─────────────────────────────────────────────────────────────
 // User APIs
@@ -229,6 +265,28 @@ function getUserById(id) {
     avatarUrl: row.avatar_url || null,
   };
 }
+
+function putAudlabRecord(meta) {
+  stmtPutAudlab.run(
+    String(meta.id),
+    String(meta.ns),
+    Number(meta.createdAt || Date.now()),
+    Number(meta.durationMs || 0),
+    Number(meta.width || 0),
+    Number(meta.height || 0),
+    Number(meta.fps || 60),
+    String(meta.ext || "webm"),
+    String(meta.mime || "video/webm")
+  );
+  return true;
+}
+function listAudlabRecordsByNS(ns, limit = 50, offset = 0) {
+  limit = Math.min(Math.max(Number(limit)||50, 1), 200);
+  offset = Math.max(Number(offset)||0, 0);
+  return stmtListAudlab.all(String(ns).toLowerCase(), limit, offset);
+}
+function deleteAudlabRecordsByNS(ns) { stmtDeleteAudlabByNS.run(String(ns).toLowerCase()); return true; }
+function deleteAudlabRecordById(id)  { stmtDeleteAudlabById.run(String(id)); return true; }
 
 /**
  * Update profile fields (partial update).
@@ -461,4 +519,9 @@ module.exports = {
   normalizeJib,
   getJibStory,
   putJibStory,
+
+  putAudlabRecord,
+  listAudlabRecordsByNS,
+  deleteAudlabRecordsByNS,
+  deleteAudlabRecordById,
 };

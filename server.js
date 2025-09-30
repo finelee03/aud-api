@@ -77,8 +77,9 @@ process.env.UPLOAD_ROOT = UPLOAD_ROOT;
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 
 const AVATAR_DIR  = path.join(UPLOAD_ROOT, "avatars");
-const AUDLAB_ROOT = path.join(UPLOAD_ROOT, "audlab");
 fs.mkdirSync(AVATAR_DIR,  { recursive: true });
+
+const AUDLAB_ROOT = path.join(UPLOAD_ROOT, "audlab");
 fs.mkdirSync(AUDLAB_ROOT, { recursive: true });
 
 function findFirstExisting(dir, id, exts) {
@@ -98,6 +99,13 @@ function dirForNS(ns) {
 
 const BOOT_ID = uuid();
 const app = express();
+if (!app._uploads_served) {
+  app.use("/uploads", express.static(UPLOAD_ROOT, {
+    immutable: false, maxAge: "365d", fallthrough: true,
+    setHeaders(res, p) { res.setHeader("Access-Control-Allow-Origin", "*"); }
+  }));
+  app._uploads_served = true;
+}
 app.set('trust proxy', 1);
 
 function ensureUserAudlabDir(req) {
@@ -219,6 +227,15 @@ const ALLOWED_AUDIO_MIMES = new Set([
   "audio/aac",
 ]);
 
+// [ADD] video/webm 허용 목록 (브라우저별 코덱 다양성 대응)
+const ALLOWED_WEBM_VIDEO = new Set([
+  "video/webm",
+  "video/webm;codecs=vp9,opus",
+  "video/webm;codecs=vp8,opus",
+  "video/webm;codecs=vp9",
+  "video/webm;codecs=vp8",
+]);
+
 function isAllowedImageMime(mime) {
   const m = String(mime || "").toLowerCase();
   const base = m.split(";")[0];
@@ -236,6 +253,12 @@ function isAllowedAudioMime(mime) {
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+// [ADD] 대용량 비디오 업로더 (녹화 업로드 전용)
+const videoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200MB
 });
 process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
 process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
@@ -832,6 +855,79 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────
+// [ADD] AudLab 캔버스 녹화 업로드 (video/webm)
+// POST multipart/form-data:
+//  - record: Blob(webm)
+//  - meta:   JSON string { id?, startedAt, endedAt, width, height, fps, note? }
+// why: me 페이지에서 Play~Submit 구간을 그대로 저장 → adminme에서 재현
+// ──────────────────────────────────────────────────────────
+app.post("/api/audlab/record", requireLogin, videoUpload.single("record"), (req, res) => {
+  try {
+    const slot = ensureUserAudlabDir(req);
+    if (!slot) return res.status(400).json({ ok:false, error:"ns_unavailable" });
+    const { ns, dir } = slot;
+
+    const f = req.file;
+    if (!f || !f.buffer || !f.mimetype) {
+      return res.status(400).json({ ok:false, error:"missing_record" });
+    }
+    const mime = String(f.mimetype).toLowerCase();
+    const baseMime = mime.split(";")[0];
+    if (!ALLOWED_WEBM_VIDEO.has(mime) && !ALLOWED_WEBM_VIDEO.has(baseMime)) {
+      return res.status(415).json({ ok:false, error:"unsupported_media_type" });
+    }
+
+    let meta = {};
+    try { meta = JSON.parse(String(req.body?.meta || "{}")); } catch {}
+    const id = String(meta?.id || `rec_${Date.now()}`);
+
+    const webmPath = path.join(dir, `${id}.webm`);
+    const jsonPath = path.join(dir, `${id}.json`);
+
+    // 안전가드: 경로 탈출 방지
+    if (!webmPath.startsWith(dir + path.sep) || !jsonPath.startsWith(dir + path.sep)) {
+      return res.status(400).json({ ok:false, error:"bad_path" });
+    }
+
+    fs.writeFileSync(webmPath, f.buffer);
+    const startedAt = Number(meta?.startedAt || Date.now());
+    const endedAt   = Number(meta?.endedAt   || Date.now());
+    const durationMs= Math.max(0, endedAt - startedAt);
+
+    // 기존 submit 메타와 호환되도록 author/ns 필드 구성
+    let author = null;
+    try {
+      const row = typeof getUserByEmail === "function" ? getUserByEmail(ns) : null;
+      author = row ? {
+        id: row.id ?? null,
+        email: row.email ?? ns,
+        displayName: getDisplayNameById?.(row.id) || (row.email ? row.email.split("@")[0] : null),
+        avatarUrl: latestAvatarUrl?.(row.id) || null
+      } : { id: ns, email: ns, displayName: (ns.split("@")[0] || null), avatarUrl: null };
+    } catch { author = { id: ns, email: ns, displayName: (ns.split("@")[0] || null), avatarUrl: null }; }
+
+    const metaOut = {
+      id, ns, author,
+      width: Number(meta?.width || 0),
+      height: Number(meta?.height || 0),
+      fps: Number(meta?.fps || 60),
+      startedAt, endedAt, durationMs,
+      createdAt: Date.now(),
+      ext: "webm",
+      mime: "video/webm",
+      note: typeof meta?.note === "string" ? meta.note : null
+    };
+    fs.writeFileSync(jsonPath, JSON.stringify(metaOut));
+
+    const base = `/uploads/audlab/${encodeURIComponent(ns)}/${id}`;
+    return res.json({ ok:true, id, ns, video: `${base}.webm`, json: `${base}.json` });
+  } catch (e) {
+    console.log("[/api/audlab/record] fatal:", e?.message || e);
+    return res.status(500).json({ ok:false, error:"record_failed" });
+  }
+});
+
 // [ADD] DELETE /auth/me
 app.delete("/auth/me", requireLogin, csrfProtection, handleAccountDelete);
 // [ADD] DELETE /api/users/me
@@ -854,12 +950,15 @@ app.get("/api/audlab/list", requireLogin, (req, res) => {
 
     const items = ids.slice(0, 200).map(id => {
       const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
-      const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]);
+      const vidExt = findFirstExisting(dir, id, ["webm"]); // video/webm
+      const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]); // 순수 오디오
+      const base = `/uploads/audlab/${encodeURIComponent(ns)}/${id}`;
       return {
         id,
-        json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
-        image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
-        ...(audExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audExt}` } : {})
+        json:  `${base}.json`,
+        image: `${base}.${imgExt}`,
+        ...(vidExt ? { video: `${base}.${vidExt}` } : {}),
+        ...(audExt ? { audio: `${base}.${audExt}` } : {})
       };
     });
 
@@ -1196,7 +1295,8 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
       const id = f.replace(/\.json$/i, "");
 
       const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
-      const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]);
+      const vidExt = findFirstExisting(dir, id, ["webm"]); // video/webm
+      const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]);
 
       let user = null;
       try {
@@ -1230,13 +1330,15 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
 
       if (!user) user = { id: ns, email: null, displayName: null, avatarUrl: null };
 
-      return {
+      const out = {
         id,
         json:  `/uploads/audlab/${safeNs}/${id}.json`,
         image: `/uploads/audlab/${safeNs}/${id}.${imgExt}`,
+        ...(vidExt ? { video: `/uploads/audlab/${safeNs}/${id}.${vidExt}` } : {}),
         ...(audExt ? { audio: `/uploads/audlab/${safeNs}/${id}.${audExt}` } : {}),
         user,
       };
+      return out;
     });
 
     res.json({ ok:true, ns, items });
@@ -1272,7 +1374,8 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
         try { meta = JSON.parse(fs.readFileSync(jPath, "utf8")); } catch {}
 
         const imgExt = findFirstExisting(dir, id, EXT_IMG) || meta?.ext || "png";
-        const audExt = findFirstExisting(dir, id, EXT_AUD) || meta?.audioExt || null;
+        const vidExt = findFirstExisting(dir, id, ["webm"]) || (meta?.ext === "webm" ? "webm" : null);
+        const audExt = findFirstExisting(dir, id, EXT_AUD.filter(e => e !== "webm")) || meta?.audioExt || null;
 
         let user = null;
         if (meta?.author?.id || meta?.author?.email || meta?.author?.displayName) {
@@ -1327,6 +1430,7 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
           bg: meta?.bg || meta?.bg_color || meta?.bgHex || null,
           json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
           image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
+          ...(vidExt ? { video: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${vidExt}` } : {}),
           ...(audExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audExt}` } : {}),
           user,
           mime: EXT_MIME[imgExt] || meta?.mime || null,
@@ -1357,13 +1461,15 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
     const pointCount = (j.strokes||[]).reduce((s, st)=>s+(st.points?.length||0), 0);
 
     const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || j.ext || "png";
-    const audExt = findFirstExisting(dir, id, ["webm","ogg","mp3","wav"]) || j.audioExt || null;
+    const vidExt = findFirstExisting(dir, id, ["webm"]) || (j.ext === "webm" ? "webm" : null);
+    const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]) || j.audioExt || null;
 
     res.json({
       ok:true, ns, id,
       meta: { strokeCount: (j.strokes||[]).length, pointCount, width:j.width, height:j.height },
       jsonUrl:  `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
       imageUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${imgExt}`,
+      ...(vidExt ? { videoUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${vidExt}` } : {}),
       ...(audExt ? { audioUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${audExt}` } : {})
     });
   } catch {
