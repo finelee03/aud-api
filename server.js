@@ -90,6 +90,11 @@ function findFirstExisting(dir, id, exts) {
   return null;
 }
 
+const IMAGE_EXTS = ["png","jpg","jpeg","webp","gif"];
+const VIDEO_EXTS = ["webm"];
+const AUDIO_EXTS = ["webm","weba","ogg","mp3","wav","m4a"];
+const AUDIO_EXTS_LEGACY = ["ogg","mp3","wav","m4a"];
+
 // ──────────────────────────────────────────────────────────
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
@@ -967,16 +972,36 @@ app.get("/api/audlab/list", requireLogin, (req, res) => {
     ids.sort((a,b) => (b > a ? 1 : -1));
 
     const items = ids.slice(0, 200).map(id => {
-      const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
-      const vidExt = findFirstExisting(dir, id, ["webm"]); // video/webm
-      const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]); // 순수 오디오
+      const metaPath = path.join(dir, `${id}.json`);
+      let meta = null;
+      try { meta = JSON.parse(fs.readFileSync(metaPath, "utf8")); } catch {}
+
+      let metaAudioExt = meta?.audioExt ? String(meta.audioExt).toLowerCase() : null;
+      if (metaAudioExt && !AUDIO_EXTS.includes(metaAudioExt)) metaAudioExt = null;
+      const imgExt = findFirstExisting(dir, id, IMAGE_EXTS) || meta?.ext || "png";
+
+      let audExt = null;
+      if (metaAudioExt) {
+        const audioPath = path.join(dir, `${id}.${metaAudioExt}`);
+        if (fs.existsSync(audioPath)) audExt = metaAudioExt;
+      }
+      if (!audExt) {
+        audExt = findFirstExisting(dir, id, AUDIO_EXTS_LEGACY);
+      }
+
+      let vidExt = findFirstExisting(dir, id, VIDEO_EXTS);
+      if (audExt && vidExt && audExt === vidExt && metaAudioExt === audExt) {
+        vidExt = null;
+      }
+
       const base = `/uploads/audlab/${encodeURIComponent(ns)}/${id}`;
       return {
         id,
         json:  `${base}.json`,
         image: `${base}.${imgExt}`,
         ...(vidExt ? { video: `${base}.${vidExt}` } : {}),
-        ...(audExt ? { audio: `${base}.${audExt}` } : {})
+        ...(audExt ? { audio: `${base}.${audExt}` } : {}),
+        ...(meta?.durationMs ? { durationMs: Number(meta.durationMs) } : {})
       };
     });
 
@@ -1312,22 +1337,37 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
     const items = files.slice(0, 200).map(f => {
       const id = f.replace(/\.json$/i, "");
 
-      const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || "png";
-      const vidExt = findFirstExisting(dir, id, ["webm"]); // video/webm
-      const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]);
+      const metaPath = path.join(dir, `${id}.json`);
+      let meta = null;
+      try { meta = JSON.parse(fs.readFileSync(metaPath, "utf8")); } catch {}
+
+      const imgExt = findFirstExisting(dir, id, IMAGE_EXTS) || meta?.ext || "png";
+
+      let metaAudioExt = meta?.audioExt ? String(meta.audioExt).toLowerCase() : null;
+      if (metaAudioExt && !AUDIO_EXTS.includes(metaAudioExt)) metaAudioExt = null;
+      let audExt = null;
+      if (metaAudioExt) {
+        const audioPath = path.join(dir, `${id}.${metaAudioExt}`);
+        if (fs.existsSync(audioPath)) audExt = metaAudioExt;
+      }
+      if (!audExt) {
+        audExt = findFirstExisting(dir, id, AUDIO_EXTS_LEGACY);
+      }
+
+      let vidExt = findFirstExisting(dir, id, VIDEO_EXTS) || (meta?.ext === "webm" ? "webm" : null);
+      if (audExt && vidExt && audExt === vidExt && metaAudioExt === audExt) {
+        vidExt = null;
+      }
 
       let user = null;
-      try {
-        const meta = JSON.parse(fs.readFileSync(path.join(dir, `${id}.json`), "utf8"));
-        if (meta?.author) {
-          user = {
-            id: meta.author.id ?? null,
-            email: meta.author.email ?? null,
-            displayName: meta.author.displayName ?? null,
-            avatarUrl: meta.author.avatarUrl ?? null,
-          };
-        }
-      } catch {}
+      if (meta?.author) {
+        user = {
+          id: meta.author.id ?? null,
+          email: meta.author.email ?? null,
+          displayName: meta.author.displayName ?? null,
+          avatarUrl: meta.author.avatarUrl ?? null,
+        };
+      }
 
       if (!user) {
         const nsNum = Number(ns);
@@ -1367,8 +1407,6 @@ adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
 
 adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
   try {
-    const EXT_IMG = ["png","jpg","jpeg","webp","gif"];
-    const EXT_AUD = ["webm","ogg","mp3","wav"];
     const EXT_MIME = { png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", webp:"image/webp", gif:"image/gif" };
 
     const nses = fs.readdirSync(AUDLAB_ROOT, { withFileTypes: true })
@@ -1391,9 +1429,23 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
         let meta = null;
         try { meta = JSON.parse(fs.readFileSync(jPath, "utf8")); } catch {}
 
-        const imgExt = findFirstExisting(dir, id, EXT_IMG) || meta?.ext || "png";
-        const vidExt = findFirstExisting(dir, id, ["webm"]) || (meta?.ext === "webm" ? "webm" : null);
-        const audExt = findFirstExisting(dir, id, EXT_AUD.filter(e => e !== "webm")) || meta?.audioExt || null;
+        const imgExt = findFirstExisting(dir, id, IMAGE_EXTS) || meta?.ext || "png";
+
+        let metaAudioExt = meta?.audioExt ? String(meta.audioExt).toLowerCase() : null;
+        if (metaAudioExt && !AUDIO_EXTS.includes(metaAudioExt)) metaAudioExt = null;
+        let audExt = null;
+        if (metaAudioExt) {
+          const audioPath = path.join(dir, `${id}.${metaAudioExt}`);
+          if (fs.existsSync(audioPath)) audExt = metaAudioExt;
+        }
+        if (!audExt) {
+          audExt = findFirstExisting(dir, id, AUDIO_EXTS_LEGACY);
+        }
+
+        let vidExt = findFirstExisting(dir, id, VIDEO_EXTS) || (meta?.ext === "webm" ? "webm" : null);
+        if (audExt && vidExt && audExt === vidExt && metaAudioExt === audExt) {
+          vidExt = null;
+        }
 
         let user = null;
         if (meta?.author?.id || meta?.author?.email || meta?.author?.displayName) {
@@ -1478,9 +1530,23 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
     const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
     const pointCount = (j.strokes||[]).reduce((s, st)=>s+(st.points?.length||0), 0);
 
-    const imgExt = findFirstExisting(dir, id, ["png","jpg","jpeg","webp","gif"]) || j.ext || "png";
-    const vidExt = findFirstExisting(dir, id, ["webm"]) || (j.ext === "webm" ? "webm" : null);
-    const audExt = findFirstExisting(dir, id, ["ogg","mp3","wav"]) || j.audioExt || null;
+    const imgExt = findFirstExisting(dir, id, IMAGE_EXTS) || j.ext || "png";
+
+    let metaAudioExt = j?.audioExt ? String(j.audioExt).toLowerCase() : null;
+    if (metaAudioExt && !AUDIO_EXTS.includes(metaAudioExt)) metaAudioExt = null;
+    let audExt = null;
+    if (metaAudioExt) {
+      const audioPath = path.join(dir, `${id}.${metaAudioExt}`);
+      if (fs.existsSync(audioPath)) audExt = metaAudioExt;
+    }
+    if (!audExt) {
+      audExt = findFirstExisting(dir, id, AUDIO_EXTS_LEGACY);
+    }
+
+    let vidExt = findFirstExisting(dir, id, VIDEO_EXTS) || (j.ext === "webm" ? "webm" : null);
+    if (audExt && vidExt && audExt === vidExt && metaAudioExt === audExt) {
+      vidExt = null;
+    }
 
     res.json({
       ok:true, ns, id,
