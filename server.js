@@ -338,21 +338,42 @@ async function handleAccountDelete(req, res) {
 
 // dataURL → Buffer
 function decodeDataURL(dataURL) {
-  const m = String(dataURL || "").match(/^data:([a-z0-9.+/-]+);base64,(.+)$/i);
-  if (!m) return null;
-  const mime = m[1].toLowerCase();
-  const buf  = Buffer.from(m[2], "base64");
+  const raw = String(dataURL || "");
+  if (!raw.startsWith("data:")) return null;
+
+  const commaIdx = raw.indexOf(",");
+  if (commaIdx < 0) return null;
+  const meta = raw.slice(5, commaIdx); // strip "data:"
+  const payload = raw.slice(commaIdx + 1);
+  if (!payload) return null;
+
+  const metaParts = meta.split(";").map((s) => s.trim()).filter(Boolean);
+  if (!metaParts.length) return null;
+
+  const mime = metaParts[0].toLowerCase();
+  const isBase64 = metaParts.slice(1).some((p) => p.toLowerCase() === "base64");
+  if (!isBase64) return null;
+
+  let buf;
+  try { buf = Buffer.from(payload, "base64"); }
+  catch { return null; }
+
   const map = {
     "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif",
-    "audio/webm;codecs=opus": "webm", "audio/webm": "webm", "audio/ogg": "ogg", "audio/ogg;codecs=opus": "ogg",
-    "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/aac": "m4a",
+    "audio/webm;codecs=opus": "webm", "audio/webm": "webm",
+    "audio/ogg": "ogg", "audio/ogg;codecs=opus": "ogg",
+    "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav",
+    "audio/mp4": "m4a", "audio/aac": "m4a", "audio/mp4;codecs=mp4a.40.2": "m4a",
   };
+
+  const fullMime = mime;
   const baseMime = mime.split(";")[0];
   const ext =
-    map[mime] || map[baseMime] ||
+    map[fullMime] || map[baseMime] ||
     (baseMime.startsWith("image/") ? baseMime.split("/")[1] : null) ||
     (baseMime.startsWith("audio/") ? baseMime.split("/")[1] : null) || "bin";
-  return { mime, buf, ext };
+
+  return { mime: fullMime, buf, ext };
 }
 
 // NS 추출(화이트리스트)
