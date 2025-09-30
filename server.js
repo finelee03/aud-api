@@ -1125,10 +1125,17 @@ app.use("/uploads", express.static(UPLOAD_ROOT, {
     res.set("Access-Control-Allow-Origin", "*");
     res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
     res.set("Access-Control-Allow-Headers", "Range, Content-Type");
+    res.set("Cross-Origin-Resource-Policy", "cross-origin");
     res.set("Accept-Ranges", "bytes");
     res.set("Cache-Control", "public, max-age=31536000, immutable");
   }
 }));
+app.options("/uploads/*", (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Range, Content-Type");
+  res.status(204).end();
+});
 
 // === Admin-only endpoints (audlab) ===
 const adminRouter = express.Router();
