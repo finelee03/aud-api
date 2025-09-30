@@ -68,12 +68,16 @@ const {
 const { startBleBridge } = require("./ble-bridge");
 
 // --- Persistent data root ---
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, ".data"); // why: 배포시 볼륨 마운트 지점
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, ".data"); // Render: /var/data
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// 업로드(유저 파일)는 여전히 public/uploads 하위에 두되, 배포플랫폼에서 이 폴더도 볼륨으로 마운트 권장
-const AVATAR_DIR   = path.join(__dirname, "public", "uploads", "avatars");
-const AUDLAB_ROOT  = path.join(__dirname, "public", "uploads", "audlab");
+// === 모든 업로드는 퍼시스턴트 디스크 한 곳(UPLOAD_ROOT)으로 통일 ===
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(DATA_DIR, "uploads");
+process.env.UPLOAD_ROOT = UPLOAD_ROOT;
+fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
+
+const AVATAR_DIR  = path.join(UPLOAD_ROOT, "avatars");
+const AUDLAB_ROOT = path.join(UPLOAD_ROOT, "audlab");
 fs.mkdirSync(AVATAR_DIR,  { recursive: true });
 fs.mkdirSync(AUDLAB_ROOT, { recursive: true });
 
@@ -88,13 +92,9 @@ function findFirstExisting(dir, id, exts) {
 // ──────────────────────────────────────────────────────────
 // 기본 셋업
 // ──────────────────────────────────────────────────────────
-
 function dirForNS(ns) {
   return path.join(UPLOAD_ROOT, encodeURIComponent(String(ns || '').toLowerCase()));
 }
-
-const USER_AUDLAB_ROOT = path.join(__dirname, "public", "uploads", "audlab");
-try { fs.mkdirSync(USER_AUDLAB_ROOT, { recursive: true }); } catch {}
 
 const BOOT_ID = uuid();
 const app = express();
@@ -103,7 +103,7 @@ app.set('trust proxy', 1);
 function ensureUserAudlabDir(req) {
   const ns = emailNS(req, null);           // ✅ 이메일 NS 고정
   if (!ns) return null;
-  const dir = path.join(USER_AUDLAB_ROOT, encodeURIComponent(ns));
+  const dir = path.join(AUDLAB_ROOT, encodeURIComponent(ns));
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   return { ns, dir };
 }
@@ -237,11 +237,8 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
 });
-const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "public", "uploads");
-process.env.UPLOAD_ROOT = process.env.UPLOAD_ROOT || UPLOAD_ROOT;
 process.env.FORCE_FALLBACK_PUBLIC = process.env.FORCE_FALLBACK_PUBLIC || "1";
 process.env.FORCE_FALLBACK_ITEMS  = process.env.FORCE_FALLBACK_ITEMS  || "1";
-fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 function ensureDir(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
 
 // [ADD] 유저 업로드/아바타 파일 하드 삭제
@@ -954,7 +951,7 @@ app.post(
   }
 );
 
-app.use("/uploads", express.static(path.join(__dirname, "public", "uploads"), {
+app.use("/uploads", express.static(UPLOAD_ROOT, {
   setHeaders(res){
     res.set("Accept-Ranges", "bytes");
     res.set("Cache-Control", "public, max-age=31536000, immutable");
