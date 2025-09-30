@@ -94,6 +94,12 @@ const IMAGE_EXTS = ["png","jpg","jpeg","webp","gif"];
 const VIDEO_EXTS = ["webm"];
 const AUDIO_EXTS = ["webm","weba","ogg","mp3","wav","m4a"];
 const AUDIO_EXTS_LEGACY = ["ogg","mp3","wav","m4a"];
+const AUDLAB_ALL_EXTS = Array.from(new Set([
+  ...IMAGE_EXTS,
+  ...VIDEO_EXTS,
+  ...AUDIO_EXTS,
+  ...AUDIO_EXTS_LEGACY,
+]));
 
 // ──────────────────────────────────────────────────────────
 // 기본 셋업
@@ -1116,6 +1122,9 @@ app.post(
 
 app.use("/uploads", express.static(UPLOAD_ROOT, {
   setHeaders(res){
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Range, Content-Type");
     res.set("Accept-Ranges", "bytes");
     res.set("Cache-Control", "public, max-age=31536000, immutable");
   }
@@ -1776,6 +1785,67 @@ app.put("/api/jibbitz/:jib/story", requireLogin, csrfProtection, express.json(),
     return res.json({ ok:true, jib: jb, story: saved.story, updatedAt: saved.updatedAt });
   } catch {
     return res.status(500).json({ ok:false, error:"save_failed" });
+  }
+});
+
+adminRouter.post("/admin/audlab/delete", requireAdmin, csrfProtection, (req, res) => {
+  try {
+    const ns = String(req.body?.ns || "").trim();
+    const id = String(req.body?.id || "").trim();
+    if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
+
+    const safeNs = nsSafe(ns);
+    const dir = path.join(AUDLAB_ROOT, safeNs);
+    if (!dir.startsWith(AUDLAB_ROOT)) {
+      return res.status(400).json({ ok:false, error:"bad_ns" });
+    }
+
+    const removed = [];
+
+    if (fs.existsSync(dir)) {
+      const prefix = `${id}.`;
+      const files = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of files) {
+        if (!entry.isFile()) continue;
+        const name = entry.name;
+        if (name === `${id}.json` || name.startsWith(prefix)) {
+          const fp = path.join(dir, name);
+          try {
+            fs.rmSync(fp, { force: true });
+            removed.push(name);
+          } catch {}
+        }
+      }
+
+      const indexPath = path.join(dir, "_index.json");
+      if (fs.existsSync(indexPath)) {
+        try {
+          const raw = fs.readFileSync(indexPath, "utf8");
+          const parsed = JSON.parse(raw);
+          const idx = Array.isArray(parsed) ? parsed : [];
+          const next = idx.filter((item) => String(item?.id) !== id);
+          if (next.length !== idx.length) {
+            fs.writeFileSync(indexPath, JSON.stringify(next));
+          }
+        } catch {}
+      }
+    }
+
+    let leftovers = [];
+    if (fs.existsSync(dir)) {
+      leftovers = fs.readdirSync(dir)
+        .filter((name) => name === `${id}.json` || name.startsWith(`${id}.`));
+    }
+
+    const ok = leftovers.length === 0;
+    const payload = { ok, ns, id, removed, removedCount: removed.length, leftovers };
+    if (!ok) {
+      return res.status(500).json({ ...payload, error: "delete_incomplete" });
+    }
+    return res.json(payload);
+  } catch (e) {
+    console.log("[/admin/audlab/delete] failed:", e?.message || e);
+    return res.status(500).json({ ok:false, error:"SERVER_ERROR" });
   }
 });
 app.post("/api/jib/story", requireLogin, csrfProtection, express.json(), (req, res) => {
