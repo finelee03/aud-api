@@ -150,20 +150,6 @@ const PROD = process.env.NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || "810b135542bc33386aa6018125d3b6df";
 const NAV_TTL_MS = Number(process.env.NAV_TTL_MS || 10000);
 
-const serveStatic = require("serve-static");
-app.use(
-  "/uploads",
-  serveStatic(UPLOAD_ROOT, {
-    setHeaders(res, filePath) {
-      // why: GitHub Pages에서 cross-origin 이미지/미디어 로드 허용
-      res.setHeader("Access-Control-Allow-Origin", (process.env.ALLOWED_ORIGINS || "*"));
-      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-      // 긴 캐시 X (관리자가 바로 확인)
-      res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
-    },
-  })
-);
-
 // 최근 내비게이션 마킹
 function markNavigate(req) {
   try { req.session.navAt = Date.now(); req.session.save?.(()=>{}); } catch {}
@@ -1552,28 +1538,6 @@ function adminBootstrapHandler(req, res) {
 app.get("/api/audlab/admin/bootstrap", requireLogin, adminBootstrapHandler);
 app.get("/api/admin/audlab/bootstrap", requireLogin, adminBootstrapHandler);
 
-app.get("/api/admin/audlab/json", requireAdmin, async (req, res) => {
-  try {
-    const ns = emailNS(req, req.query.ns || "");
-    const id = String(req.query.id || "").trim();
-    if (!ns || !id) return res.status(400).json({ ok:false, error:"bad_params" });
-
-    // 파일 경로
-    const nsDir = path.join(AUDLAB_ROOT, encodeURIComponent(ns));
-    const jsonPath = path.join(nsDir, `${id}.json`);
-    if (!fs.existsSync(jsonPath)) return res.status(404).json({ ok:false, error:"not_found" });
-
-    // JSON 직접 전달 (CORB 회피)
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.setHeader("Cache-Control", "no-store");
-    const raw = fs.readFileSync(jsonPath, "utf8");
-    // 유효성 최소 보장
-    let j; try { j = JSON.parse(raw); } catch { return res.status(500).json({ ok:false, error:"invalid_json" }); }
-    return res.json({ ok:true, data:j });
-  } catch (e) {
-    return res.status(500).json({ ok:false, error:String(e?.message||e) });
-  }
-});
 
 // 비밀번호 변경
 app.post("/auth/password",        requireLogin, csrfProtection, applyPasswordChange);
