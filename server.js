@@ -787,68 +787,75 @@ app.post("/api/audlab/submit", requireLogin, bigJson, async (req, res) => {
     const { ns, dir } = slot;
     const id = `lab_${Date.now()}`;
 
-    const decodedImg = decodeDataURL(req.body?.previewDataURL || req.body?.thumbDataURL || "");
-    if (!decodedImg || !/^image\//.test(decodedImg.mime) || !isAllowedImageMime(decodedImg.mime)) {
-      return res.status(400).json({ ok:false, error:"bad_preview_mime" });
-    }
-    if (decodedImg.buf.length > 8 * 1024 * 1024) {
-      return res.status(413).json({ ok:false, error:"image_too_large" });
+    // 1) strokes 필수 검증
+    const strokes = Array.isArray(req.body?.strokes) ? req.body.strokes : [];
+    if (strokes.length === 0) {
+      return res.status(400).json({ ok:false, error:"strokes_required" });
     }
 
-    const imgExt  = decodedImg.ext || "png";
-    const imgMime = decodedImg.mime || "image/png";
-    fs.writeFileSync(path.join(dir, `${id}.${imgExt}`), decodedImg.buf);
-
-    let audioExt = null;
-    let audioMime = null;
-    if (req.body?.audioDataURL) {
-      const decodedAud = decodeDataURL(req.body.audioDataURL);
-      if (decodedAud && /^audio\//.test(decodedAud.mime)) {
-        if (!isAllowedAudioMime(decodedAud.mime)) {
-          return res.status(400).json({ ok:false, error:"bad_audio_mime" });
-        }
-        if (decodedAud.buf.length > 12 * 1024 * 1024) {
-          return res.status(413).json({ ok:false, error:"audio_too_large" });
-        }
-        audioExt = decodedAud.ext || "webm";
-        audioMime = decodedAud.mime || "audio/webm";
-        fs.writeFileSync(path.join(dir, `${id}.${audioExt}`), decodedAud.buf);
+    // 2) 프리뷰 이미지는 선택(있으면 저장)
+    let previewUrl = "";
+    const previewRaw = req.body?.previewDataURL || req.body?.thumbDataURL || "";
+    if (previewRaw) {
+      const decodedImg = decodeDataURL(previewRaw);
+      if (!decodedImg || !/^image\//.test(decodedImg.mime) || !isAllowedImageMime(decodedImg.mime)) {
+        return res.status(400).json({ ok:false, error:"bad_preview_mime" });
       }
+      if (decodedImg.buf.length > 8 * 1024 * 1024) {
+        return res.status(413).json({ ok:false, error:"image_too_large" });
+      }
+      const imgExt  = decodedImg.ext || "png";
+      fs.writeFileSync(path.join(dir, `${id}.${imgExt}`), decodedImg.buf);
+      previewUrl = `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`;
     }
 
-    const meta = {
-      id, ns,
-      width: Number(req.body?.width || 0),
-      height: Number(req.body?.height || 0),
-      strokes: Array.isArray(req.body?.strokes) ? req.body.strokes : [],
-      // 작성자 = 저장될 NS의 사용자(이메일 기준). 세션 사용자가 아니라 'ns' 기준으로 기록.
-      author: (() => {
-        // ns는 ensureUserAudlabDir(req) 위에서 이미 결정됨
+    // 3) 타이밍/메타
+    const width      = Number(req.body?.width  || 0);
+    const height     = Number(req.body?.height || 0);
+    const startedAt  = Number(req.body?.startedAt || Date.now());
+    const endedAt    = Number(req.body?.endedAt   || Date.now());
+    const durationMs = Number(req.body?.durationMs || Math.max(0, endedAt - startedAt));
+
+    // author 메타(있으면 풍부하게)
+    const author = (() => {
+      try {
         const row = (typeof getUserByEmail === "function") ? getUserByEmail(ns) : null;
-        if (row) {
-          return {
-            id: row.id ?? null,
-            email: row.email ?? ns,
-            displayName: getDisplayNameById?.(row.id) || (row.email ? row.email.split("@")[0] : null),
-            avatarUrl: latestAvatarUrl?.(row.id) || null
-          };
-        }
-        // DB에 유저가 없어도 최소 email은 ns로 기록 (이름/아바타는 null)
+        return row ? {
+          id: row.id ?? null,
+          email: row.email ?? ns,
+          displayName: getDisplayNameById?.(row.id) || (row.email ? row.email.split("@")[0] : null),
+          avatarUrl: latestAvatarUrl?.(row.id) || null
+        } : { id: ns, email: ns, displayName: (ns.split("@")[0] || null), avatarUrl: null };
+      } catch {
         return { id: ns, email: ns, displayName: (ns.split("@")[0] || null), avatarUrl: null };
-      })(),
+      }
+    })();
+
+    // 4) JSON 메타(핵심: strokes 저장)
+    const meta = {
+      id, ns, author,
+      width, height,
+      startedAt, endedAt, durationMs,
       createdAt: Date.now(),
-      ext: imgExt,
-      mime: imgMime,
-      ...(audioExt ? { audioExt, audioMime } : {}),
+      strokes,            // ★ path만 저장
+      ext: previewUrl ? (previewUrl.split(".").pop().toLowerCase()) : null,
+      mime: previewUrl ? (previewUrl.endsWith(".png") ? "image/png"
+                 : previewUrl.endsWith(".webp") ? "image/webp"
+                 : previewUrl.endsWith(".jpg") || previewUrl.endsWith(".jpeg") ? "image/jpeg"
+                 : null) : null
     };
     fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(meta));
 
+    // 5) 응답 (신규 키 + 하위호환)
+    const base = `/uploads/audlab/${encodeURIComponent(ns)}/${id}`;
     return res.json({
       ok: true,
       id, ns,
-      json:  `/uploads/audlab/${encodeURIComponent(ns)}/${id}.json`,
-      image: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${imgExt}`,
-      ...(audioExt ? { audio: `/uploads/audlab/${encodeURIComponent(ns)}/${id}.${audioExt}` } : {}),
+      jsonUrl: `${base}.json`,
+      previewUrl: previewUrl || null,
+      // 레거시 키(기존 프런트가 기대할 수도 있음)
+      json:  `${base}.json`,
+      ...(previewUrl ? { image: previewUrl } : {})
     });
   } catch (e) {
     return res.status(500).json({ ok:false, error:"submit_failed" });
