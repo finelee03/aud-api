@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS jibbitz_stories (
   updated_at  INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS nfc_map (
+  ns         TEXT NOT NULL,
+  uid        TEXT NOT NULL,
+  label      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (ns, uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_nfc_map_ns_label
+ON nfc_map (ns, label);
+
 CREATE TABLE IF NOT EXISTS audlab_records (
   id           TEXT PRIMARY KEY,
   ns           TEXT NOT NULL,

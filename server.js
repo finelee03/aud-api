@@ -18,6 +18,8 @@ const { v4: uuid } = require("uuid");
 const compression = require("compression");
 const sharp = require("sharp");
 require("dotenv").config();
+const nfcRoutes = require("./routes/nfc.routes");
+const installGatewayRoutes = require("./routes/gateway.routes");
 
 // === Admin config & seeding ===
 const EMAIL_RX = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
@@ -171,6 +173,10 @@ const io = new Server(server, {
     }
   })
 });
+
+if (typeof installGatewayRoutes === "function") {
+  installGatewayRoutes(app, io);
+}
 
 const ITEM_OWNER_NS = new Map();
 
@@ -496,6 +502,7 @@ const sessionMiddleware = session({
   },
 });
 app.use(sessionMiddleware);
+app.use("/api", nfcRoutes);
 
 // CSRF (쿠키 모드)
 const CSRF_COOKIE_NAME = PROD ? "__Host-csrf" : "csrf";
