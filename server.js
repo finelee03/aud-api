@@ -1162,6 +1162,109 @@ app.use("/uploads", express.static(UPLOAD_ROOT, {
 
 // === Admin-only endpoints (audlab) ===
 const adminRouter = express.Router();
+
+const AUDLAB_STATUS = {
+  SUBMITTED: "submitted",
+  DEVELOPING: "developing",
+  DEVELOPED: "developed",
+};
+const VALID_AUDLAB_STATUS = new Set(Object.values(AUDLAB_STATUS));
+
+function readAudlabIndex(dir) {
+  const indexPath = path.join(dir, "_index.json");
+  try {
+    const raw = fs.readFileSync(indexPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeAudlabIndex(dir, rows) {
+  const indexPath = path.join(dir, "_index.json");
+  fs.writeFileSync(indexPath, JSON.stringify(rows));
+}
+
+function mutateAudlabStatus(ns, id, nextStatus) {
+  const safeNs = nsSafe(ns);
+  const dir = path.join(AUDLAB_ROOT, safeNs);
+  if (!fs.existsSync(dir)) return { ok: false, error: "not_found" };
+
+  const now = Date.now();
+  let idx = readAudlabIndex(dir);
+  let hit = null;
+  let found = false;
+
+  idx = idx.map((entry) => {
+    if (String(entry.id) !== String(id)) return entry;
+    found = true;
+    const next = {
+      ...entry,
+      accepted: nextStatus !== AUDLAB_STATUS.SUBMITTED ? true : !!entry.accepted,
+      status: nextStatus,
+      updatedAt: now,
+    };
+    hit = next;
+    return next;
+  });
+
+  if (!found) {
+    const metaPath = path.join(dir, `${id}.json`);
+    if (!fs.existsSync(metaPath)) return { ok: false, error: "not_found" };
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(metaPath, "utf8")); } catch {}
+    const next = {
+      id,
+      ns,
+      label: meta?.label || "",
+      createdAt: meta?.createdAt || Date.now(),
+      width: Number(meta?.width || 0),
+      height: Number(meta?.height || 0),
+      ext: meta?.ext || "png",
+      mime: meta?.mime || "image/png",
+      author: meta?.author || null,
+      accepted: nextStatus !== AUDLAB_STATUS.SUBMITTED,
+      status: nextStatus,
+      updatedAt: now,
+    };
+    idx.unshift(next);
+    hit = next;
+  }
+
+  writeAudlabIndex(dir, idx);
+
+  const metaPath = path.join(dir, `${id}.json`);
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    meta.accepted = nextStatus !== AUDLAB_STATUS.SUBMITTED ? true : !!meta.accepted;
+    meta.status = nextStatus;
+    meta.updatedAt = now;
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+  } catch {}
+
+  return { ok: true, entry: hit };
+}
+
+function ensureDevelopedBadge(ns) {
+  try {
+    const email = String(ns || "").trim().toLowerCase();
+    if (!EMAIL_RX.test(email)) return false;
+    const user = getUserByEmail?.(email);
+    if (!user) return false;
+    const snap = getUserState?.(user.id, email);
+    const baseState = snap && typeof snap.state === "object" && snap.state ? { ...snap.state } : {};
+    const badges = baseState.badges && typeof baseState.badges === "object" ? { ...baseState.badges } : {};
+    if (badges.audLabDeveloped) return false;
+    badges.audLabDeveloped = true;
+    baseState.badges = badges;
+    putUserState(user.id, email, baseState, Date.now());
+    return true;
+  } catch (e) {
+    console.log("[audlab] badge update failed:", e?.message || e);
+    return false;
+  }
+}
 try { fs.mkdirSync(AUDLAB_ROOT, { recursive: true }); } catch {}
 
 const nsSafe = (s) => encodeURIComponent(String(s||"").trim().toLowerCase());
@@ -1567,6 +1670,7 @@ adminRouter.get("/admin/audlab/all", requireAdmin, (req, res) => {
           mime: EXT_MIME[imgExt] || meta?.mime || null,
           audioExt: audExt || null,
           accepted: !!meta?.accepted,
+          status: meta?.status || (meta?.accepted ? AUDLAB_STATUS.DEVELOPING : AUDLAB_STATUS.SUBMITTED),
           previewDataURL: meta?.previewDataURL || null,
         });
       }
@@ -1613,6 +1717,7 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
     const strokes = Array.isArray(j.strokes) ? j.strokes : [];
     const width = Number(j.width || 0);
     const height = Number(j.height || 0);
+    const status = j?.status || (j?.accepted ? AUDLAB_STATUS.DEVELOPING : AUDLAB_STATUS.SUBMITTED);
 
     res.json({
       ok:true, ns, id,
@@ -1620,6 +1725,7 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
       width,
       height,
       strokes,
+      status,
       jsonUrl:  `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
       imageUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${imgExt}`,
       ...(vidExt ? { videoUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${vidExt}` } : {}),
@@ -1636,39 +1742,42 @@ adminRouter.post("/admin/audlab/accept", requireAdmin, csrfProtection, (req, res
     const id = String(req.body?.id || "").trim();
     if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
 
-    const dir = path.join(AUDLAB_ROOT, nsSafe(ns));
-    const indexPath = path.join(dir, '_index.json');
-
-    let idx = []; try { idx = JSON.parse(fs.readFileSync(indexPath, "utf8")); } catch {}
-    let hit = null;
-
-    if (!hit) {
-      const jPath = path.join(dir, `${id}.json`);
-      if (!fs.existsSync(jPath)) return res.status(404).json({ ok:false, error:"not_found" });
-      const j = JSON.parse(fs.readFileSync(jPath, "utf8"));
-      hit = {
-        id,
-        ns,
-        label: j.label || "",
-        createdAt: j.createdAt || Date.now(),
-        width: j.width || 0,
-        height: j.height || 0,
-        ext: j.ext || "png",
-        mime: j.mime || "image/png",
-        author: j.author || null,
-      };
-      idx.unshift(hit);
+    const result = mutateAudlabStatus(ns, id, AUDLAB_STATUS.DEVELOPING);
+    if (!result.ok) {
+      const code = result.error === "not_found" ? 404 : 400;
+      return res.status(code).json({ ok:false, error: result.error || "status_update_failed" });
     }
 
-    idx = idx.map(m => {
-      if (String(m.id) === id) { hit = m; return { ...m, accepted:true, updatedAt:Date.now() }; }
-      return m;
-    });
-    if (!hit) return res.status(404).json({ ok:false, error:"not_found" });
+    return res.json({ ok:true, status: AUDLAB_STATUS.DEVELOPING });
+  } catch (e) {
+    console.log("[/admin/audlab/accept] failed:", e?.message || e);
+    return res.status(500).json({ ok:false, error:"SERVER_ERROR" });
+  }
+});
 
-    fs.writeFileSync(indexPath, JSON.stringify(idx));
-    return res.json({ ok:true });
-  } catch { return res.status(500).json({ ok:false }); }
+adminRouter.post("/admin/audlab/status", requireAdmin, csrfProtection, (req, res) => {
+  try {
+    const ns = String(req.body?.ns || "").trim();
+    const id = String(req.body?.id || "").trim();
+    const statusRaw = String(req.body?.status || "").trim().toLowerCase();
+    if (!ns || !id) return res.status(400).json({ ok:false, error:"ns_and_id_required" });
+    if (!VALID_AUDLAB_STATUS.has(statusRaw) || statusRaw === AUDLAB_STATUS.SUBMITTED) {
+      return res.status(400).json({ ok:false, error:"invalid_status" });
+    }
+
+    const result = mutateAudlabStatus(ns, id, statusRaw);
+    if (!result.ok) {
+      const code = result.error === "not_found" ? 404 : 400;
+      return res.status(code).json({ ok:false, error: result.error || "status_update_failed" });
+    }
+
+    if (statusRaw === AUDLAB_STATUS.DEVELOPED) ensureDevelopedBadge(ns);
+
+    return res.json({ ok:true, status: statusRaw });
+  } catch (e) {
+    console.log("[/admin/audlab/status] failed:", e?.message || e);
+    return res.status(500).json({ ok:false, error:"SERVER_ERROR" });
+  }
 });
 
 app.use("/api", adminRouter);
