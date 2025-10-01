@@ -25,4 +25,12 @@ function attachBleNamespaces(io, { gatewayToken }) {
   });
 }
 
-module.exports = { attachBleNamespaces };
+function startBleBridge(io, opts = {}) {
+  const gatewayToken = opts.gatewayToken || process.env.GATEWAY_TOKEN || '';
+  attachBleNamespaces(io, { gatewayToken });
+  if (opts.log) {
+    console.log('[ble] namespaces attached', gatewayToken ? '(gateway token set)' : '(gateway token missing)');
+  }
+}
+
+module.exports = { attachBleNamespaces, startBleBridge };
