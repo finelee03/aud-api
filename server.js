@@ -1603,9 +1603,16 @@ adminRouter.get("/admin/audlab/item", requireAdmin, (req, res) => {
       vidExt = null;
     }
 
+    const strokes = Array.isArray(j.strokes) ? j.strokes : [];
+    const width = Number(j.width || 0);
+    const height = Number(j.height || 0);
+
     res.json({
       ok:true, ns, id,
-      meta: { strokeCount: (j.strokes||[]).length, pointCount, width:j.width, height:j.height },
+      meta: { strokeCount: strokes.length, pointCount, width, height },
+      width,
+      height,
+      strokes,
       jsonUrl:  `/uploads/audlab/${nsSafe(ns)}/${id}.json`,
       imageUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${imgExt}`,
       ...(vidExt ? { videoUrl: `/uploads/audlab/${nsSafe(ns)}/${id}.${vidExt}` } : {}),
