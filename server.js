@@ -538,13 +538,32 @@ function requireLogin(req, res, next) {
   res.status(401).json({ ok: false, error: "auth_required" });
 }
 function getUserRowOrNull(uid) {
-  try { return getUserById ? getUserById(uid) : null; } catch { return null; }
+  try {
+    if (!getUserById) {
+      console.warn("[getUserRowOrNull] getUserById function is not available");
+      return null;
+    }
+    return getUserById(uid);
+  } catch (err) {
+    console.error(`[getUserRowOrNull] Error getting user ${uid}:`, err?.message || err);
+    return null;
+  }
 }
 function requireAdmin(req, res, next) {
-  if (!req.session?.uid) return res.status(401).json({ ok:false, error:"auth_required" });
+  if (!req.session?.uid) {
+    console.log("[requireAdmin] No session UID");
+    return res.status(401).json({ ok:false, error:"auth_required" });
+  }
   const row = getUserRowOrNull(req.session.uid);
-  if (row && isAdminEmail(row.email)) return next();
-  return res.status(403).json({ ok:false, error:"forbidden" });
+  if (!row) {
+    console.log(`[requireAdmin] User not found for UID: ${req.session.uid}`);
+    return res.status(403).json({ ok:false, error:"user_not_found" });
+  }
+  if (!isAdminEmail(row.email)) {
+    console.log(`[requireAdmin] User ${row.email} is not an admin`);
+    return res.status(403).json({ ok:false, error:"not_admin" });
+  }
+  return next();
 }
 function sendNoStore(res) { res.set("Cache-Control", "no-store"); }
 function statusPayload(req) {
