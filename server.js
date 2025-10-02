@@ -1425,6 +1425,8 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
     const perNS = [];
     for (const ns of nsDirs) {
       const items = readAllItems(ns);
+      console.log(`[leaderboards] ${ns}: found ${items.length} items`);
+      console.log(`[leaderboards] ${ns}: items with labels: ${items.filter(x => x.label).length}`);
 
       let posts = items.length;
       let votes = 0;
@@ -1447,10 +1449,12 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
         if (total > 0) {
           participated++;
           const tops = winnersOf(counts);
+          console.log(`[leaderboards] ${ns} item ${it.id}: label="${it.label}", tops=[${tops.join(',')}], counts=`, counts);
           if (it.label && tops.includes(it.label)) matched++;
         }
       }
 
+      console.log(`[leaderboards] ${ns}: posts=${posts}, votes=${votes}, participated=${participated}, matched=${matched}`);
       perNS.push({ ns, posts, votes, participated, matched });
     }
 
