@@ -1435,11 +1435,25 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
 
       for (const it of items) {
         const counts = {};
+        // g_ 접두사를 제거한 ID로도 조회 시도
+        const itemId = String(it.id || "");
+        const itemIdWithoutPrefix = itemId.replace(/^g_/, "");
+
         try {
-          for (const r of stmtCounts.all(it.id)) {
+          // 원본 ID로 조회
+          for (const r of stmtCounts.all(itemId)) {
             const lb = norm(r.label);
             if (!lb) continue;
             counts[lb] = (counts[lb] || 0) + Number(r.n || 0);
+          }
+
+          // g_ 없는 ID로도 조회 (중복 제거를 위해 다른 ID일 때만)
+          if (itemIdWithoutPrefix !== itemId) {
+            for (const r of stmtCounts.all(itemIdWithoutPrefix)) {
+              const lb = norm(r.label);
+              if (!lb) continue;
+              counts[lb] = (counts[lb] || 0) + Number(r.n || 0);
+            }
           }
         } catch {}
 
@@ -1449,7 +1463,7 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
         if (total > 0) {
           participated++;
           const tops = winnersOf(counts);
-          console.log(`[leaderboards] ${ns} item ${it.id}: label="${it.label}", tops=[${tops.join(',')}], counts=`, counts);
+          console.log(`[leaderboards] ${ns} item ${itemId}: label="${it.label}", tops=[${tops.join(',')}], counts=`, counts);
           if (it.label && tops.includes(it.label)) matched++;
         }
       }
