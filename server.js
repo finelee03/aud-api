@@ -1514,11 +1514,27 @@ adminRouter.get("/admin/debug/votes", requireAdmin, (req, res) => {
     const sampleVotes = db.prepare("SELECT item_id, user_id, label FROM item_votes LIMIT 10").all();
     const votesByItem = db.prepare("SELECT item_id, COUNT(*) as count FROM item_votes GROUP BY item_id LIMIT 10").all();
 
+    // 갤러리 아이템 샘플
+    const ns = "jwyang29@snu.ac.kr";
+    const items = [];
+    const dirForUploadNS = (ns) => path.join(UPLOAD_ROOT, encodeURIComponent(String(ns).toLowerCase()));
+    const dir = dirForUploadNS(ns);
+    const indexPath = path.join(dir, "_index.json");
+    try {
+      const idx = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+      if (Array.isArray(idx)) {
+        items.push(...idx.slice(0, 5).map(m => ({ id: m?.id, label: m?.label })));
+      }
+    } catch (e) {
+      items.push({ error: e.message });
+    }
+
     res.json({
       ok: true,
       totalVotes: totalVotes?.total || 0,
       sampleVotes,
-      votesByItem
+      votesByItem,
+      galleryItems: items
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
