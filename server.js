@@ -2124,17 +2124,41 @@ app.get("/api/state", requireLogin, (req, res) => {
 
 app.put("/api/state", requireLogin, csrfProtection, (req, res) => {
   const email = emailNS(req, req.body?.ns);
-  const state = req.body.state || req.body;
-  const updatedAt = Number(state?.updatedAt || Date.now());
-  if (email) putStateByEmail(email, state, updatedAt);
+  const incomingState = req.body.state || req.body;
+  const updatedAt = Number(incomingState?.updatedAt || Date.now());
+
+  // 기존 state를 읽어서 badges 보존
+  if (email) {
+    const user = getUserByEmail(email);
+    if (user) {
+      const existing = getUserState(user.id, email);
+      const existingBadges = existing?.state?.badges;
+      if (existingBadges && typeof existingBadges === "object") {
+        incomingState.badges = { ...existingBadges, ...(incomingState.badges || {}) };
+      }
+    }
+    putStateByEmail(email, incomingState, updatedAt);
+  }
   return res.json({ ok: true, ns: email });
 });
 
 app.post("/api/state", requireLogin, csrfProtection, (req, res) => {
   const email = emailNS(req, req.body?.ns);
-  const state = req.body.state || req.body;
-  const updatedAt = Number(state?.updatedAt || Date.now());
-  if (email) putStateByEmail(email, state, updatedAt);
+  const incomingState = req.body.state || req.body;
+  const updatedAt = Number(incomingState?.updatedAt || Date.now());
+
+  // 기존 state를 읽어서 badges 보존
+  if (email) {
+    const user = getUserByEmail(email);
+    if (user) {
+      const existing = getUserState(user.id, email);
+      const existingBadges = existing?.state?.badges;
+      if (existingBadges && typeof existingBadges === "object") {
+        incomingState.badges = { ...existingBadges, ...(incomingState.badges || {}) };
+      }
+    }
+    putStateByEmail(email, incomingState, updatedAt);
+  }
   return res.json({ ok: true, ns: email });
 });
 
