@@ -1790,7 +1790,12 @@ adminRouter.post("/admin/audlab/status", requireAdmin, csrfProtection, (req, res
       return res.status(code).json({ ok:false, error: result.error || "status_update_failed" });
     }
 
-    if (statusRaw === AUDLAB_STATUS.DEVELOPED) ensureDevelopedBadge(ns);
+    if (statusRaw === AUDLAB_STATUS.DEVELOPED) {
+      const badgeGranted = ensureDevelopedBadge(ns);
+      if (badgeGranted && io) {
+        io.to(`user:${ns}`).emit("badge:granted", { badge: "audLabDeveloped", ns });
+      }
+    }
 
     return res.json({ ok:true, status: statusRaw });
   } catch (e) {
@@ -3059,6 +3064,12 @@ io.on("connection", (sock) => {
       if (!id) continue;
       sock.join(`item:${id}`);
       if (ns) ITEM_OWNER_NS.set(id, ns);
+    }
+
+    const rooms = Array.isArray(payload.rooms) ? payload.rooms : [];
+    for (const room of rooms) {
+      const roomName = String(room || "").trim();
+      if (roomName) sock.join(roomName);
     }
   });
 
