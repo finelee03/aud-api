@@ -1267,38 +1267,23 @@ function mutateAudlabStatus(ns, id, nextStatus) {
 
 function ensureDevelopedBadge(ns) {
   try {
-    console.log("[ensureDevelopedBadge] START - ns:", ns);
     const email = String(ns || "").trim().toLowerCase();
-    if (!EMAIL_RX.test(email)) {
-      console.log("[ensureDevelopedBadge] FAIL - invalid email");
-      return false;
-    }
+    if (!EMAIL_RX.test(email)) return false;
     const user = getUserByEmail(email);
-    console.log("[ensureDevelopedBadge] user:", user ? `id=${user.id}` : "NOT FOUND");
     if (!user) return false;
 
     const snap = getUserState(user.id, email);
-    console.log("[ensureDevelopedBadge] current state snapshot:", snap ? "EXISTS" : "EMPTY");
-
     const baseState = snap && typeof snap.state === "object" && snap.state ? { ...snap.state } : {};
     const badges = baseState.badges && typeof baseState.badges === "object" ? { ...baseState.badges } : {};
 
-    console.log("[ensureDevelopedBadge] current badges:", JSON.stringify(badges));
-
-    if (badges.audLabDeveloped) {
-      console.log("[ensureDevelopedBadge] SKIP - badge already exists");
-      return false;
-    }
+    if (badges.audLabDeveloped) return false;
 
     badges.audLabDeveloped = true;
     baseState.badges = badges;
-
-    console.log("[ensureDevelopedBadge] saving new state with badges:", JSON.stringify(badges));
     putUserState(user.id, email, baseState, Date.now());
-    console.log("[ensureDevelopedBadge] SUCCESS - badge saved");
     return true;
   } catch (e) {
-    console.log("[ensureDevelopedBadge] ERROR:", e?.message || e, e?.stack);
+    console.log("[audlab] badge update failed:", e?.message || e);
     return false;
   }
 }
@@ -2112,12 +2097,7 @@ app.get("/api/jibbitz/catalog", requireLogin, (_req, res) => {
 // ──────────────────────────────────────────────────────────
 app.get("/api/state", requireLogin, (req, res) => {
   const ns = emailNS(req, null);
-  console.log("[GET /api/state] uid:", req.session.uid, "ns:", ns);
   const row = getUserState(req.session.uid, ns);
-  console.log("[GET /api/state] row:", row ? "EXISTS" : "NULL");
-  if (row) {
-    console.log("[GET /api/state] state.badges:", JSON.stringify(row.state?.badges));
-  }
   if (!row) return res.json({ ok: true, state: null });
   return res.json({ ok: true, state: row.state, updatedAt: row.updatedAt });
 });
