@@ -1267,20 +1267,38 @@ function mutateAudlabStatus(ns, id, nextStatus) {
 
 function ensureDevelopedBadge(ns) {
   try {
+    console.log("[ensureDevelopedBadge] START - ns:", ns);
     const email = String(ns || "").trim().toLowerCase();
-    if (!EMAIL_RX.test(email)) return false;
-    const user = getUserByEmail?.(email);
+    if (!EMAIL_RX.test(email)) {
+      console.log("[ensureDevelopedBadge] FAIL - invalid email");
+      return false;
+    }
+    const user = getUserByEmail(email);
+    console.log("[ensureDevelopedBadge] user:", user ? `id=${user.id}` : "NOT FOUND");
     if (!user) return false;
-    const snap = getUserState?.(user.id, email);
+
+    const snap = getUserState(user.id, email);
+    console.log("[ensureDevelopedBadge] current state snapshot:", snap ? "EXISTS" : "EMPTY");
+
     const baseState = snap && typeof snap.state === "object" && snap.state ? { ...snap.state } : {};
     const badges = baseState.badges && typeof baseState.badges === "object" ? { ...baseState.badges } : {};
-    if (badges.audLabDeveloped) return false;
+
+    console.log("[ensureDevelopedBadge] current badges:", JSON.stringify(badges));
+
+    if (badges.audLabDeveloped) {
+      console.log("[ensureDevelopedBadge] SKIP - badge already exists");
+      return false;
+    }
+
     badges.audLabDeveloped = true;
     baseState.badges = badges;
+
+    console.log("[ensureDevelopedBadge] saving new state with badges:", JSON.stringify(badges));
     putUserState(user.id, email, baseState, Date.now());
+    console.log("[ensureDevelopedBadge] SUCCESS - badge saved");
     return true;
   } catch (e) {
-    console.log("[audlab] badge update failed:", e?.message || e);
+    console.log("[ensureDevelopedBadge] ERROR:", e?.message || e, e?.stack);
     return false;
   }
 }
