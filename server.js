@@ -1424,11 +1424,12 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
 
     const perNS = [];
     for (const ns of nsDirs) {
+      const galleryOnly = readGalleryItems(ns);
       const items = readAllItems(ns);
-      console.log(`[leaderboards] ${ns}: found ${items.length} items`);
+      console.log(`[leaderboards] ${ns}: gallery=${galleryOnly.length}, total=${items.length}`);
       console.log(`[leaderboards] ${ns}: items with labels: ${items.filter(x => x.label).length}`);
 
-      let posts = items.length;
+      let posts = galleryOnly.length; // 갤러리 포스트만 카운트
       let votes = 0;
       let participated = 0;
       let matched = 0;
