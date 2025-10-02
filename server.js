@@ -2112,7 +2112,12 @@ app.get("/api/jibbitz/catalog", requireLogin, (_req, res) => {
 // ──────────────────────────────────────────────────────────
 app.get("/api/state", requireLogin, (req, res) => {
   const ns = emailNS(req, null);
+  console.log("[GET /api/state] uid:", req.session.uid, "ns:", ns);
   const row = getUserState(req.session.uid, ns);
+  console.log("[GET /api/state] row:", row ? "EXISTS" : "NULL");
+  if (row) {
+    console.log("[GET /api/state] state.badges:", JSON.stringify(row.state?.badges));
+  }
   if (!row) return res.json({ ok: true, state: null });
   return res.json({ ok: true, state: row.state, updatedAt: row.updatedAt });
 });
