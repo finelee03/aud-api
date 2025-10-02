@@ -1507,6 +1507,24 @@ adminRouter.get("/admin/leaderboards", requireAdmin, (req, res) => {
   }
 });
 
+// DEBUG: 투표 데이터 확인
+adminRouter.get("/admin/debug/votes", requireAdmin, (req, res) => {
+  try {
+    const totalVotes = db.prepare("SELECT COUNT(*) as total FROM item_votes").get();
+    const sampleVotes = db.prepare("SELECT item_id, user_id, label FROM item_votes LIMIT 10").all();
+    const votesByItem = db.prepare("SELECT item_id, COUNT(*) as count FROM item_votes GROUP BY item_id LIMIT 10").all();
+
+    res.json({
+      ok: true,
+      totalVotes: totalVotes?.total || 0,
+      sampleVotes,
+      votesByItem
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // 특정 NS의 제출물 목록
 adminRouter.get("/admin/audlab/list", requireAdmin, (req, res) => {
   try {
