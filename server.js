@@ -1029,12 +1029,14 @@ app.post("/auth/login", async (req, res) => {
     }
     req.session.uid = row.id;
     markNavigate(req);
-    console.log("[LOGIN] Success - returning token for:", email);
+    const isAdmin = isAdminEmail(email);
+    console.log("[LOGIN] Success - returning token for:", email, "isAdmin:", isAdmin);
     return res.json({
       ok: true,
       id: row.id,
       email: email.toLowerCase(),
-      token: token
+      token: token,
+      isAdmin: isAdmin
     });
   });
 });
